@@ -1,6 +1,8 @@
 # Audio in recordings: implementation plan
 
-Status: phases 0 and 1 done (system sound), 2026-11-01.
+Status: phases 0–2 done (system sound; microphone, several sources, volumes,
+separate tracks, devices), 2026-11-01. Phase 3 (controls, Flatpak) next;
+phase 4 (smart balance) proposed.
 
 ## Goal
 
@@ -17,8 +19,10 @@ for, so nobody's microphone is recorded by surprise.
 | Not ffmpeg's own audio input (`-f pulse`) | Rejected | ffmpeg would stamp audio with its own clock, and keep recording through a pause. clipt's video timestamps are its own (see the recording plan's writer), so audio has to be too |
 | Not native PipeWire audio | Rejected for now | clipt's PipeWire code handles video formats only, and the Flatpak can't reach PipeWire for audio without a permission Flathub discourages (`xdg-run/pipewire-0`); it gets audio through the PulseAudio socket. Revisit only if pipewire-pulse turns out to be missing somewhere that matters |
 | Getting audio to ffmpeg | Extra tracks in the Matroska stream clipt already writes (`A_PCM/INT/LIT`, 16-bit, 48 kHz, stereo) | Audio and video timestamps come from one clock, in one stream, so pause and sync are handled in one place |
-| Sources | `system` (the default output's monitor, `@DEFAULT_MONITOR@`), `mic` (`@DEFAULT_SOURCE@`), or `both` | Covers tutorials (`both`), demos (`system`) and narration (`mic`). Picking a specific device can come later |
-| Both at once | Two audio tracks, mixed by ffmpeg (`amix`) | Each source keeps its own clock and latency; mixing in clipt would mean resampling one to match the other |
+| Sources | Up to 8: `system` (the default output's monitor, `@DEFAULT_MONITOR@`), `mic` (`@DEFAULT_SOURCE@`), or devices by name; `both` means `system,mic` | Covers tutorials (`both`), demos (`system`) and narration (`mic`); names cover a second microphone or another output. Added in phase 2 on request, with `clipt list sound` to find the names |
+| Several at once | One audio track per source, each through its own `volume`, mixed by ffmpeg (`amix`, `normalize=0`) | Each source keeps its own clock and latency; mixing in clipt would mean resampling one to match the other. `normalize=0` keeps the volumes asked for, rather than dividing by the number of sources |
+| Balance | A volume per source, 0–400 %, set before recording (`system:70,mic:120`); optionally each source also kept as its own track at its recorded level (`--separate-audio`), after the mix | Fixed volumes give one track that plays right everywhere; separate tracks let the balance be fixed afterwards in an editor. Changing volumes during a recording is left for later (see *Not in this plan*) |
+| Listing devices | libpulse's asynchronous API, loaded like libpulse-simple, reading only the first fields of `pa_server_info` and `pa_source_info` | libpulse-simple can't list anything; the first fields of those records haven't changed in libpulse's history, and a unit test pins their offsets |
 | Encoding | AAC (ffmpeg's built-in `aac`), 160 kb/s, in every container | MP4 and MOV need it, MKV takes it, and it plays everywhere. Opus is better per bit but not in MOV, and is awkward in MP4 for some players |
 | GIF | No audio | GIF can't hold sound; `--audio` with `--gif` says so and records without it |
 | Default | Off | Recording the microphone without being asked would be a privacy failure |
@@ -94,17 +98,29 @@ construction. What can still go wrong, and the answer to each:
 
 ## User interface
 
-- `clipt record --audio[=system|mic|both]`; a bare `--audio` means
-  `system`. `--no-audio` overrides the setting for one recording.
-- Setting: `record_audio = "none"` (default), `"system"`, `"mic"` or
-  `"both"`.
+- `clipt record --audio[=SOURCES]`: `system`, `mic`, `both`, or a comma-
+  separated list of sources (`system`, `mic`, device names), each with an
+  optional `:PERCENT` volume. A bare `--audio` means `system`.
+  `--separate-audio` also keeps each source as its own track. `--no-audio`
+  overrides the setting for one recording.
+- Settings: `record_audio`, taking the same values (default `"none"`), and
+  `record_separate_audio` (default `false`).
+- `clipt list sound` lists the devices, marking what `system` and `mic`
+  stand for. (Not new lines in `clipt list`: the Flatpak probe script counts
+  its lines as outputs.)
+- Track names: "Mix", then "System sound", "Microphone" or the device name;
+  stored as the handler name in MP4 and MOV (what players show) and as the
+  title in MKV.
 - Overlay in record mode: a toggle in the toolbar (speaker, microphone, off)
   that starts from the setting. It changes only that recording, not the
   setting.
 - Tray: a *Record with sound* checkbox under the record entries.
 - Errors are clear and stop before recording starts: no libpulse-simple, no
-  sound server, or no microphone, each saying what to install or check.
-  The recording doesn't quietly go ahead without sound.
+  sound server, an unknown device (pointing at `clipt list sound`), or a
+  volume out of range, each saying what to install or check. The recording
+  doesn't quietly go ahead without sound. (A missing microphone can't be
+  told apart: the server always has a default input, falling back to a
+  monitor or a dummy device.)
 - The man page, completions, README Usage and CHANGELOG get the new
   options.
 
@@ -124,9 +140,12 @@ construction. What can still go wrong, and the answer to each:
   with a null sink in the container. Play a 1 kHz tone, record, and check
   the result with `ffprobe` and `astats`: there is an AAC track, the tone is
   in it, and its duration matches the video. Pause test: the tone plays only
-  while paused, and the file must be silent there. Sync test: the test window
-  flashes white and a beep plays at the same moment, and the beep's onset
-  must land within 40 ms (about one frame) of the flash.
+  while paused, and the file must be silent there. Several sources: a second
+  null sink stands in for the microphone with a 440 Hz tone, so each track
+  can be checked by frequency. (The planned beep-and-flash sync test was
+  dropped: the test's own playback latency, ffmpeg's PulseAudio output and
+  PulseAudio's slow start, is unknown, so it would mostly measure itself.
+  The spike measured stamping against a known reference instead.)
 - Flatpak: the same tone test through `clipt-launch` against headless
   Sway, as done for video.
 - By hand: 30 minutes with a video playing on Plasma, then the sync
@@ -149,11 +168,117 @@ with pipewire-pulse: a tone is recorded at the right level, sound and video
 last as long, a tone played only while paused is left out, `--gif` with
 `--audio` warns, and a missing server stops the recording before it starts.
 
-**2. Microphone and both.** `mic` and `both`, the `amix` path, the e2e sync
-test, the microphone-missing error.
+**2. Several sources (done 2026-11-01).** Widened on request from "`mic`
+and `both`" to: any number of sources up to 8, a volume for each,
+`--separate-audio`, devices by name and `clipt list sound`. e2e tests on
+all three desktops: the listing, three tracks with the right names, each
+separate track holding only its own tone (31 dB apart), the mix holding
+both equally, `system:100,mic:25` putting the microphone 12 dB under,
+a device by name, and the unknown-device and volume errors. Found on the
+way: pipewire-pulse, unlike PulseAudio, accepts a stream from a device that
+doesn't exist, and the recording ran on with nothing from it, so named
+devices are now checked against the server's list before recording, and a
+source that has delivered nothing after 5 s stops the recording.
 
 **3. Controls and packaging.** Overlay toggle, tray checkbox, Flatpak
-permission and ffmpeg components, man page, completions, README, CHANGELOG.
+permission and ffmpeg components (now also `asplit`, `amix` and `volume`).
+The man page, completions, README and CHANGELOG already cover phases 1
+and 2.
+
+**4. Smart balance (proposed).** Keeping a voice intelligible over the
+desktop's sound, from the voice-over-music rules below. Starts with a
+spike.
+
+## Smart balance (phase 4)
+
+clipt has the voice and the other sources as separate streams before they
+are mixed, which is what this needs. A setting such as
+`record_audio_balance = "off" | "duck" | "smart"` (default `off`):
+
+| Step | How | When | In |
+|---|---|---|---|
+| Voice clean-up: high-pass ~80 Hz, ~3:1 compression for 4–8 dB of gain reduction, de-essing, 2–4 kHz presence boost | ffmpeg `highpass`, `acompressor`, `deesser`, `equalizer` on the voice source | While recording | `duck`, `smart` |
+| Ducking: the other sources dip while the voice is present, attack 10–50 ms, release 200–500 ms | `sidechaincompress` on each other source, keyed by a split of the voice | While recording | `duck`, `smart` |
+| Dynamic EQ: 3–6 dB cut at 1–4 kHz in the other sources only while the voice is present | `acrossover` splits them at 1 and 4 kHz; only the middle band goes through `sidechaincompress`; the bands are summed again | While recording | `smart` |
+| Measuring intelligibility: Speech Intelligibility Index (ANSI S3.5, octave bands) | In clipt, on the PCM chunks it already handles: octave-band filters at 250 Hz–8 kHz, levels per ~400 ms frame for the voice and for the rest, SII = Σ Iᵢ·clamp((SNRᵢ + 15)/30, 0, 1) with weights 0.062, 0.167, 0.237, 0.265, 0.214, 0.055. Judged on the 10th-percentile frame | Reported at stop ("speech clarity 0.84, good") | `smart` |
+| Fixing it | If the 10th-percentile SII is under 0.75 (or 0.90 for a safe margin), mix again from the separate tracks with the other sources lower until it isn't; sound is re-encoded, video copied | At stop | `smart` |
+| Loudness: −14 LUFS integrated, −1 dBTP | `loudnorm`, two passes, on the final mix, video copied | At stop | opt-in setting |
+
+To settle first:
+- **Which source is the voice.** `mic` by default; a named device would
+  need marking, for example `--audio=system,alsa_input…:voice`.
+- **Only frames with speech count.** Between sentences the voice's SNR is
+  meaningless and would drag the 10th percentile down, so the measurement
+  needs voice activity detection on the voice (see below).
+- **Speakers spoil it.** Through speakers the microphone also hears the
+  desktop, so its track looks clearer than it is and SII reads high.
+  Headphones keep it honest; clipt could say so when it can't tell.
+- **SII treats music as steady noise.** Judging the 10th percentile helps;
+  the broadband rules of thumb (other sound 15 dB under the voice, 20 dB
+  if it has singing or talking, 10–12 dB with the dynamic EQ) are the
+  sanity check.
+- **Testing needs speech-like sound.** Steady tones won't trigger ducking
+  the way speech does; speech-shaped, syllable-rate modulated noise can
+  stand in for a voice in the e2e tests.
+
+### Telling what's playing
+
+Two questions, answered on separate threads fed from the chunks the writer
+already handles (never in the reading thread, so a slow analysis can't hold
+up a read; no real-time callback is involved, so no lock-free ring buffer
+is needed either):
+
+- **Is someone speaking?** (the voice source) **nnnoiseless**, a pure-Rust
+  port of RNNoise: no model file, no ONNX Runtime, BSD-3-Clause (allowed
+  by `deny.toml`). It works at 48 kHz on 10 ms frames, so each 20 ms chunk
+  is two frames and nothing is resampled, and it returns a voice
+  probability per frame. It's also a denoiser, which could later cover
+  noise suppression. Silero VAD is more accurate but needs ONNX Runtime (a
+  native library few have) or tract (megabytes more); webrtc-vad compiles
+  C into the binary (harder for the cross-compiled release targets) and is
+  weaker against background noise. A separate, mostly clean voice source
+  should be within nnnoiseless's reach; the spike checks it.
+- **What is the rest: music with vocals, instrumental music, or noise?**
+  It picks the target in the broadband rule: 20 dB under the voice for
+  singing or other talkers (competing speech masks beyond its energy,
+  which SII doesn't capture), 15 dB otherwise. Open until the spike, in
+  order of cost:
+  1. No model: assume the safe 20 dB, or take a hint
+     (`background = "vocals" | "instrumental" | "noise"`).
+  2. YAMNet (AudioSet's 521 classes: summed speech-and-singing scores
+     against music scores, an RMS gate to skip silence, decisions smoothed
+     over a few windows), behind a cargo feature. Its ~3.7 M parameters
+     are about 15 MB, three times clipt's binary, so the model would be
+     downloaded on first use to `~/.local/share/clipt/models` and checked
+     against a known hash, not built in. It would run through `tract`
+     (pure Rust; `ort` loads ONNX Runtime, which few have) on 0.96 s
+     windows every 0.48 s at 16 kHz, so this path does resample (`rubato`
+     or a simple polyphase filter), on one thread, loaded before recording
+     starts. The Flatpak has no network access, so it would ship the
+     model. The licence of the ONNX export's weights needs checking.
+
+Libraries, if the measurement moves into clipt: the octave-band filters
+are a few biquads, about 30 lines, so written here rather than a crate
+(`biquad` would do, pure Rust); an FFT (`realfft`) is more than six bands
+need and adds to the binary. `ebur128` (pure Rust, MIT) for short-term
+loudness per stream, if the broadband rules are checked live; the −14 LUFS
+master stays with ffmpeg's `loudnorm`. Not `cpal`: on Linux it links ALSA
+(and libpulse or libpipewire with those features), which clipt avoids so
+it starts without them, and it doesn't readily record the output's monitor.
+No lock-free ring buffer either: sound is read with blocking reads on its
+own thread, not in a real-time callback.
+
+Spike:
+- A recording of speech over music, mixed plain, ducked, and ducked with
+  the dynamic EQ; SII at the 10th percentile for each, against the targets
+  and the rules of thumb. It decides whether the at-stop fix is needed or
+  ducking alone gets there, and settles the ducking settings.
+- nnnoiseless on a real voice track, with pauses and some background
+  noise: how well its voice probability marks speech, and CPU per 20 ms.
+- YAMNet through tract on music with and without vocals, and on noise:
+  how often it's right after smoothing, CPU per window, the binary size
+  it adds and its load time. It decides whether the model earns its
+  weight over the 20 dB default.
 
 ## Spike results (2026-11-01)
 
@@ -222,6 +347,8 @@ drift more.
 
 ## Not in this plan
 
-Choosing devices other than the defaults, per-source volume, noise
-suppression, recording one application's sound only (PipeWire can, through
-the portal, but not through the PulseAudio API), and webcam overlay.
+Changing volumes during a recording (it would mean applying them in clipt
+before ffmpeg, with a command such as `clipt record --volume mic=+10%`;
+worth it once the overlay or tray has controls for it), noise suppression,
+recording one application's sound only (PipeWire can, through the portal,
+but not through the PulseAudio API), and webcam overlay.

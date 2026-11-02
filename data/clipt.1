@@ -55,6 +55,10 @@ when \fIname\fR is omitted.
 Print each output's name, size, position and description, then the capture
 backends available on this desktop.
 .TP
+.B list sound
+Print the sound devices \fB\-\-audio\fR can record from: each one's name and
+description, marking the ones \fBsystem\fR and \fBmic\fR stand for.
+.TP
 .B record
 Open the selection overlay in record mode: drag an area, or click a window
 or screen, then press \fBEnter\fR to start.
@@ -140,11 +144,22 @@ Recording frame rate, 1 to 240 (default 30); overrides \fBrecord_fps\fR.
 Save the recording as a GIF, made from the recording when it stops, at most
 15 frames a second.
 .TP
-\fB\-\-audio\fR[\fB=\fR\fISOURCE\fR]
-Record sound too: \fBsystem\fR (what the computer is playing, the default)
-or \fBnone\fR.
+\fB\-\-audio\fR[\fB=\fR\fISOURCES\fR]
+Record sound too.
+\fISOURCES\fR is \fBsystem\fR (what the computer is playing, the default),
+\fBmic\fR (the default input), \fBboth\fR, \fBnone\fR, or a comma-separated
+list of \fBsystem\fR, \fBmic\fR and device names from \fBclipt list sound\fR,
+each optionally followed by \fB:\fR\fIPERCENT\fR, its volume in the mix
+(0 to 400, default 100); for example \fBsystem:70,mic:120\fR.
+Several sources are mixed into one track.
 Overrides \fBrecord_audio\fR.
 Needs a PulseAudio or pipewire-pulse sound server; GIFs have no sound.
+.TP
+\fB\-\-separate\-audio\fR
+With several sound sources, also keep each one as its own track after the
+mix, at the volume it was recorded, so the balance can be changed later in an
+editor.
+Players play the mix.
 .TP
 \fB\-\-no\-audio\fR
 Record without sound, whatever \fBrecord_audio\fR says.
@@ -255,7 +270,11 @@ Encoder: \fBauto\fR, \fBvaapi\fR, \fBnvenc\fR or \fBx264\fR.
 An \fB\-o\fR path's extension takes precedence.
 .TP
 \fBrecord_audio\fR = \fI"none"\fR
-Sound to record: \fBnone\fR or \fBsystem\fR.
+Sound to record, as \fB\-\-audio\fR takes it: \fBnone\fR, \fBsystem\fR,
+\fBmic\fR, \fBboth\fR or a list such as \fB"system:70,mic:120"\fR.
+.TP
+\fBrecord_separate_audio\fR = \fIfalse\fR
+Also keep each sound source as its own track, like \fB\-\-separate\-audio\fR.
 .TP
 \fBmax_duration\fR = \fI3600\fR
 A recording stops by itself after this many seconds; 0 means no limit.

@@ -32,6 +32,7 @@ USAGE:
     clipt full            Capture the whole desktop
     clipt screen [NAME]   Capture one output (default: the first)
     clipt list            Show outputs and available capture backends
+    clipt list sound      Show the sound devices recordings can use
     clipt record          Pick an area to record (Enter starts), saved as MP4
     clipt record screen [NAME]  Record one output (default: the first)
     clipt record window [APP]   Record a window (APP: the topmost with that app id)
@@ -51,7 +52,11 @@ OPTIONS:
         --cursor          Include the pointer
         --fps N           Recording frame rate (default 30)
         --gif             Save the recording as a GIF (at most 15 fps)
-        --audio[=SOURCE]  Record sound too: system (default) or none
+        --audio[=SOURCES] Record sound too (default: system). SOURCES: system,
+                          mic, both, or device names from `clipt list sound`,
+                          comma-separated, each with an optional :PERCENT
+                          volume in the mix, e.g. system:70,mic:120
+        --separate-audio  Also keep each sound source as its own track
         --no-audio        Record without sound, whatever record_audio says
     -h, --help            Show this help
     -V, --version         Show the version
@@ -67,7 +72,8 @@ EDITOR KEYS:
 
 Config: ~/.config/clipt/config.toml (save_dir, filename, color, width,
 copy_on_save, notify, backend, cursor, font, video_dir, video_filename,
-record_fps, record_codec, record_format, record_audio, max_duration).
+record_fps, record_codec, record_format, record_audio,
+record_separate_audio, max_duration).
 Recording needs ffmpeg; on KDE and GNOME also PipeWire; with sound, a
 PulseAudio or pipewire-pulse server.
 ";
@@ -88,8 +94,9 @@ struct Args {
     stop: bool,
     pause: Option<record::PauseCmd>,
     gif: bool,
-    /// --audio[=SOURCE] or --no-audio ("none").
+    /// --audio[=SOURCES] or --no-audio ("none").
     audio: Option<String>,
+    separate_audio: bool,
 }
 
 fn parse_args() -> Result<Args> {
@@ -110,6 +117,7 @@ fn parse_args() -> Result<Args> {
             Long("gif") => a.gif = true,
             Long("audio") => a.audio = Some(p.optional_value().map(|v| v.string()).transpose()?.unwrap_or_else(|| "system".into())),
             Long("no-audio") => a.audio = Some("none".into()),
+            Long("separate-audio") => a.separate_audio = true,
             Long("stop") => a.stop = true,
             Long("pause") => a.pause = Some(record::PauseCmd::Pause),
             Long("resume") => a.pause = Some(record::PauseCmd::Resume),
@@ -124,6 +132,10 @@ fn parse_args() -> Result<Args> {
             }
             Value(v) if positional == 0 => {
                 a.cmd = v.string()?;
+                positional += 1;
+            }
+            Value(v) if positional == 1 && a.cmd == "list" => {
+                a.screen = Some(v.string()?);
                 positional += 1;
             }
             Value(v) if positional == 1 && a.cmd == "screen" => {
@@ -191,13 +203,20 @@ fn run() -> Result<()> {
     {
         return record::pause(cmd);
     }
-    let mut audio = None;
+    if args.cmd == "list" {
+        match args.screen.as_deref() {
+            Some("sound") => return list_sound(),
+            Some(other) => bail!("unknown list '{other}' (clipt list, or clipt list sound)"),
+            None => {}
+        }
+    }
+    let mut audio = Vec::new();
     if args.cmd == "record" {
         record::ensure_idle()?;
         // Before the overlay: a bad setting or missing library stops here.
         audio = record::audio::Source::parse(args.audio.as_deref().unwrap_or(&cfg.record_audio))?;
-        if audio.is_some() {
-            record::audio::check()?;
+        if !audio.is_empty() {
+            record::audio::check(&audio)?;
         }
     }
     let cursor = args.cursor || cfg.cursor;
@@ -223,7 +242,9 @@ fn run() -> Result<()> {
             },
             (Some(m), None) => bail!("unknown recording mode '{m}' (screen, region, or -g GEOM)"),
         };
-        let opts = record::Options { target, output: args.output.clone(), fps: args.fps, cursor, backend, gif: args.gif, audio };
+        let separate_audio = args.separate_audio || cfg.record_separate_audio;
+        let opts =
+            record::Options { target, output: args.output.clone(), fps: args.fps, cursor, backend, gif: args.gif, audio, separate_audio };
         return record::run(&cfg, opts);
     }
 
@@ -368,6 +389,20 @@ fn gui(
         session.release_memory();
         daemonize();
         session.serve_clipboard()?;
+    }
+    Ok(())
+}
+
+/// `clipt list sound`: what `--audio` can record, marking what `system` and
+/// `mic` stand for.
+fn list_sound() -> Result<()> {
+    for d in record::audio::devices()? {
+        let mark = match (d.is_system, d.is_mic) {
+            (true, _) => "\t(system)",
+            (_, true) => "\t(mic)",
+            _ => "",
+        };
+        println!("{}\t{}{mark}", d.name, d.description);
     }
     Ok(())
 }

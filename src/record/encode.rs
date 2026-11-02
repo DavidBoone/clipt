@@ -137,11 +137,31 @@ fn probe(c: &Codec) -> Result<()> {
 }
 
 /// Fails, saying so, if this ffmpeg can't encode the AAC sound recordings
-/// use (a minimal build may leave it out).
+/// use or mix sources (a minimal build may leave them out).
 pub fn check_aac() -> Result<()> {
     let out = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "0.1"])
-        .args(AUDIO_ARGS)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=48000:cl=stereo",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=48000:cl=stereo",
+        ])
+        .args([
+            "-t",
+            "0.1",
+            "-filter_complex",
+            &format!("[0:a]{RESAMPLE},volume=0.5[a];[1:a]{RESAMPLE}[b];[a][b]{MIX}:inputs=2[m]"),
+            "-map",
+            "[m]",
+        ])
+        .args(AAC)
         .args(["-f", "null", "-"])
         .stdin(Stdio::null())
         .output()
@@ -153,12 +173,61 @@ pub fn check_aac() -> Result<()> {
     Ok(())
 }
 
-/// Sound encoding. The resampler's async mode closes the tiny gaps and
-/// overlaps between chunks stamped on the system clock, and takes up the
-/// sound card's drift against it; `first_pts=0` fills any wait before the
-/// first chunk with silence (PulseAudio takes over a second to deliver it),
-/// so the sound starts with the video.
-const AUDIO_ARGS: [&str; 6] = ["-c:a", "aac", "-b:a", "160k", "-af", "aresample=async=1:first_pts=0"];
+/// Each source first goes through the resampler: its async mode closes the
+/// tiny gaps and overlaps between chunks stamped on the system clock, and
+/// takes up the sound card's drift against it; `first_pts=0` fills any wait
+/// before the first chunk with silence (PulseAudio takes over a second to
+/// deliver it), so the sound starts with the video.
+const RESAMPLE: &str = "aresample=async=1:first_pts=0";
+/// Mixing at full volume each (`normalize=0`): the volumes given are the
+/// volumes heard, rather than each source being divided by their number.
+const MIX: &str = "amix=duration=longest:normalize=0";
+const AAC: [&str; 4] = ["-c:a", "aac", "-b:a", "160k"];
+
+/// The sound tracks of a recording: one per source, mixed at these volumes.
+pub struct Sound {
+    pub volumes: Vec<f32>,
+    pub labels: Vec<String>,
+    /// Also keep each source as its own track, at the volume it was recorded.
+    pub separate: bool,
+}
+
+impl Sound {
+    /// ffmpeg arguments: the filter graph, the outputs to map after the video,
+    /// and their names. MP4 and MOV keep a track's name as its handler name
+    /// (what players show); Matroska as its title.
+    fn args(&self, mov: bool) -> Vec<String> {
+        let name = if mov { "handler_name" } else { "title" };
+        let n = self.volumes.len();
+        let separate = self.separate && n > 1;
+        let vol = |v: f32| if (v - 1.0).abs() < 1e-6 { String::new() } else { format!(",volume={v}") };
+        let mut graph = Vec::new();
+        for (i, &v) in self.volumes.iter().enumerate() {
+            graph.push(if separate {
+                format!("[0:a:{i}]{RESAMPLE},asplit=2[m{i}][t{i}];[m{i}]volume={v}[v{i}]")
+            } else {
+                format!("[0:a:{i}]{RESAMPLE}{}[v{i}]", vol(v))
+            });
+        }
+        let mix = if n == 1 {
+            "v0".to_string()
+        } else {
+            let ins: String = (0..n).map(|i| format!("[v{i}]")).collect();
+            graph.push(format!("{ins}{MIX}:inputs={n}[mix]"));
+            "mix".to_string()
+        };
+        let mut a = vec!["-filter_complex".to_string(), graph.join(";"), "-map".into(), "0:v".into(), "-map".into(), format!("[{mix}]")];
+        let first = if n > 1 { "Mix" } else { &self.labels[0] };
+        a.extend(["-metadata:s:a:0".into(), format!("{name}={first}")]);
+        if separate {
+            for (i, label) in self.labels.iter().enumerate() {
+                a.extend(["-map".into(), format!("[t{i}]"), format!("-metadata:s:a:{}", i + 1), format!("{name}={label}")]);
+            }
+        }
+        a.extend(AAC.iter().map(|s| s.to_string()));
+        a
+    }
+}
 
 pub struct Encoder {
     child: Child,
@@ -167,15 +236,16 @@ pub struct Encoder {
 }
 
 impl Encoder {
-    /// Start ffmpeg on a `w` x `h` video; with `audio`, also a sound track
-    /// fed through `write_audio`.
-    pub fn spawn(codec: &Codec, w: u32, h: u32, order: PixelOrder, fps: u32, audio: bool, path: &Path) -> Result<Self> {
+    /// Start ffmpeg on a `w` x `h` video, with `sound` fed through
+    /// `write_audio`.
+    pub fn spawn(codec: &Codec, w: u32, h: u32, order: PixelOrder, fps: u32, sound: Option<&Sound>, path: &Path) -> Result<Self> {
         let mut cmd = Command::new("ffmpeg");
         cmd.args(["-hide_banner", "-loglevel", "error", "-y"]).args(codec.global_args());
         cmd.args(["-f", "matroska", "-i", "pipe:0"]);
         cmd.args(codec.output_args(w, h));
-        if audio {
-            cmd.args(["-map", "0:v", "-map", "0:a"]).args(AUDIO_ARGS);
+        let mov = matches!(path.extension().and_then(|e| e.to_str()), Some("mp4" | "mov"));
+        if let Some(s) = sound {
+            cmd.args(s.args(mov));
         }
         // Variable frame rate: each frame keeps its capture time, to the
         // millisecond (left to itself, ffmpeg picks a time base from its
@@ -199,8 +269,8 @@ impl Encoder {
             s
         });
         let mut enc = Self { child, stdin, stderr: Some(stderr) };
-        let rate = audio.then_some(super::audio::RATE);
-        enc.send(&super::mkv::header(w, h, order, 1_000_000_000 / fps.max(1) as u64, rate))?;
+        let tracks = sound.map_or(0, |s| s.volumes.len());
+        enc.send(&super::mkv::header(w, h, order, 1_000_000_000 / fps.max(1) as u64, tracks, super::audio::RATE))?;
         Ok(enc)
     }
 
@@ -211,9 +281,10 @@ impl Encoder {
         self.send(frame)
     }
 
-    /// Send a chunk of sound heard `ts_ms` milliseconds into the video.
-    pub fn write_audio(&mut self, pcm: &[u8], ts_ms: u64) -> Result<()> {
-        self.send(&super::mkv::block_prefix(super::mkv::AUDIO, ts_ms, pcm.len()))?;
+    /// Send a chunk of source `i`'s sound, heard `ts_ms` milliseconds into
+    /// the video.
+    pub fn write_audio(&mut self, i: usize, pcm: &[u8], ts_ms: u64) -> Result<()> {
+        self.send(&super::mkv::block_prefix(super::mkv::audio_track(i), ts_ms, pcm.len()))?;
         self.send(pcm)
     }
 
@@ -289,6 +360,42 @@ mod tests {
             let i = vf.iter().position(|a| a == "-vf").unwrap();
             assert!(vf[i + 1].starts_with("pad=ceil(iw/2)*2:ceil(ih/2)*2"), "{c:?}: {}", vf[i + 1]);
         }
+    }
+
+    /// The AAC check's own command line is valid (it once wasn't, which made
+    /// every sound recording fail the check). Needs ffmpeg; passes without.
+    #[test]
+    fn aac_check_runs() {
+        if Command::new("ffmpeg").arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_err() {
+            return;
+        }
+        check_aac().unwrap();
+    }
+
+    #[test]
+    fn sound_graphs() {
+        let s = |v: &[f32], separate| Sound {
+            volumes: v.to_vec(),
+            labels: v.iter().enumerate().map(|(i, _)| format!("S{i}")).collect(),
+            separate,
+        };
+        let graph = |s: &Sound| s.args(false)[1].clone();
+        let maps = |s: &Sound| s.args(false).windows(2).filter(|w| w[0] == "-map").map(|w| w[1].clone()).collect::<Vec<_>>();
+        // One source: no mixer, and a volume only when it isn't 100 %.
+        let one = s(&[1.0], true);
+        assert_eq!(graph(&one), format!("[0:a:0]{RESAMPLE}[v0]"));
+        assert_eq!(maps(&one), ["0:v", "[v0]"], "a lone source isn't kept twice");
+        assert!(graph(&s(&[0.5], false)).ends_with(",volume=0.5[v0]"));
+        // Two: each at its volume into the mixer.
+        let two = s(&[0.7, 1.2], false);
+        assert_eq!(graph(&two), format!("[0:a:0]{RESAMPLE},volume=0.7[v0];[0:a:1]{RESAMPLE},volume=1.2[v1];[v0][v1]{MIX}:inputs=2[mix]"));
+        assert_eq!(maps(&two), ["0:v", "[mix]"]);
+        // Separate tracks: split before the volume, so they're as recorded.
+        let sep = s(&[0.7, 1.0], true);
+        assert!(graph(&sep).starts_with(&format!("[0:a:0]{RESAMPLE},asplit=2[m0][t0];[m0]volume=0.7[v0];")));
+        assert_eq!(maps(&sep), ["0:v", "[mix]", "[t0]", "[t1]"]);
+        assert!(sep.args(false).windows(2).any(|w| w == ["-metadata:s:a:2", "title=S1"]));
+        assert!(sep.args(true).windows(2).any(|w| w == ["-metadata:s:a:0", "handler_name=Mix"]), "MP4 names tracks by handler");
     }
 
     #[test]

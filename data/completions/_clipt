@@ -36,7 +36,8 @@ _clipt() {
     '--resume[resume the running recording]'
     '--toggle-pause[toggle pausing]'
     '--gif[save the recording as a GIF]'
-    '--audio=-[record sound too]::source:(system none)'
+    '--audio=-[record sound too]::source:(system mic both none)'
+    '--separate-audio[keep each sound source as its own track]'
     '--no-audio[record without sound]'
   )
   update=( '--check[only check for updates]' )
@@ -106,6 +107,7 @@ _clipt_args() {
           '--toggle-pause:toggle pausing'
           '--gif:save the recording as a GIF'
           '--audio:record sound too'
+          '--separate-audio:keep each sound source as its own track'
           '--no-audio:record without sound'
         )
         ;;

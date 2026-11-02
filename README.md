@@ -62,6 +62,7 @@ clipt update        # update to the latest release (--check: just check)
 clipt record        # pick an area to record, Enter starts
 clipt record --stop # ...and stop it (or Ctrl-C, or click the tray icon)
 clipt record --audio # with the sound the computer is playing
+clipt record --audio=system:70,mic:120  # and the microphone, mixed
 ```
 
 **Recording (early):** `clipt record` opens the selection overlay without the
@@ -78,8 +79,11 @@ without a gap in the video (the frame turns amber); `--stop`, Ctrl-C or
 shows a red dot while recording. Files go to `~/Videos/Screencasts` as MP4,
 or as a GIF with `--gif` (or `record_format = "gif"`). `--audio` (or
 `record_audio = "system"`) records the sound the computer is playing too,
-through a PulseAudio or pipewire-pulse server; microphone recording is
-planned ([docs/audio-plan.md](docs/audio-plan.md)).
+through a PulseAudio or pipewire-pulse server. `--audio=mic`, `both`, or a
+list of sources with volumes (`system:70,mic:120`, device names from `clipt
+list sound`) mixes several into one track; `--separate-audio` also keeps
+each as its own track, to rebalance later in an editor. With speakers rather
+than headphones the microphone hears the system sound too.
 It needs `ffmpeg` and uses the GPU encoder when there is one (VA-API on AMD
 and Intel, NVENC on NVIDIA), libx264 otherwise. It works on wlroots-family
 compositors (Sway, Hyprland, niri, labwc, river, COSMIC) directly, and on KDE

@@ -1,8 +1,8 @@
 //! Just enough Matroska to hand ffmpeg uncompressed frames *with their
 //! timestamps*: an EBML header, a live (unknown-size) Segment, one video
-//! track (`V_UNCOMPRESSED`, pixel layout as a FourCC), optionally a sound
-//! track (`A_PCM/INT/LIT`), and one Cluster per frame or sound chunk holding
-//! a single SimpleBlock.
+//! track (`V_UNCOMPRESSED`, pixel layout as a FourCC), a sound track
+//! (`A_PCM/INT/LIT`) per source being recorded, and one Cluster per frame or
+//! sound chunk holding a single SimpleBlock.
 //!
 //! Raw video on a pipe has no timestamps, and letting ffmpeg stamp frames on
 //! arrival depends on when it gets round to reading them, which drifted by
@@ -50,13 +50,17 @@ fn fourcc(order: PixelOrder) -> &'static [u8; 4] {
 }
 
 pub const VIDEO: u8 = 1;
-pub const AUDIO: u8 = 2;
+
+/// The track number of sound source `i` (0-based).
+pub fn audio_track(i: usize) -> u8 {
+    2 + i as u8
+}
 
 /// Everything before the first frame. `frame_ns` is the nominal frame
 /// interval: ffmpeg uses it for the last frame's duration and its frame-rate
-/// guess (otherwise taken from the first, often sparse, timestamps). With
-/// `audio`, a second track carries 16-bit stereo PCM at that rate.
-pub fn header(width: u32, height: u32, order: PixelOrder, frame_ns: u64, audio: Option<u32>) -> Vec<u8> {
+/// guess (otherwise taken from the first, often sparse, timestamps). Then
+/// `audio` tracks of 16-bit stereo PCM at `rate`.
+pub fn header(width: u32, height: u32, order: PixelOrder, frame_ns: u64, audio: usize, rate: u32) -> Vec<u8> {
     let ebml = [
         uint(&[0x42, 0x86], 1),              // EBMLVersion
         uint(&[0x42, 0xf7], 1),              // EBMLReadVersion
@@ -93,7 +97,8 @@ pub fn header(width: u32, height: u32, order: PixelOrder, frame_ns: u64, audio: 
     v.extend([0x18, 0x53, 0x80, 0x67, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
     v.extend(element(&[0x15, 0x49, 0xa9, 0x66], &info));
     let mut tracks = element(&[0xae], &track);
-    if let Some(rate) = audio {
+    for i in 0..audio {
+        let n = audio_track(i) as u64;
         let sound = [
             element(&[0xb5], &(rate as f64).to_be_bytes()), // SamplingFrequency
             uint(&[0x9f], 2),                               // Channels
@@ -101,8 +106,8 @@ pub fn header(width: u32, height: u32, order: PixelOrder, frame_ns: u64, audio: 
         ]
         .concat();
         let track = [
-            uint(&[0xd7], AUDIO as u64),        // TrackNumber
-            uint(&[0x73, 0xc5], AUDIO as u64),  // TrackUID
+            uint(&[0xd7], n),                   // TrackNumber
+            uint(&[0x73, 0xc5], n),             // TrackUID
             uint(&[0x83], 2),                   // TrackType: audio
             element(&[0x86], b"A_PCM/INT/LIT"), // CodecID
             element(&[0xe1], &sound),
@@ -160,16 +165,16 @@ mod tests {
         // cluster size (4 bytes here) covers everything after it, frame included
         let cluster = u64::from_be_bytes([0, 0, 0, 0, p[4] & 0x0f, p[5], p[6], p[7]]);
         assert_eq!(cluster as usize, p.len() - 8 + len);
-        let a = block_prefix(AUDIO, 20, 3840);
-        assert_eq!(a[a.len() - 4], 0x82, "the block names track 2");
+        let a = block_prefix(audio_track(1), 20, 3840);
+        assert_eq!(a[a.len() - 4], 0x83, "the second source is track 3");
     }
 
     #[test]
     fn audio_track_only_when_asked() {
-        let v = header(320, 240, PixelOrder::Bgrx, 33_333_333, None);
-        let a = header(320, 240, PixelOrder::Bgrx, 33_333_333, Some(48_000));
-        let has = |h: &[u8]| h.windows(13).any(|w| w == b"A_PCM/INT/LIT");
-        assert!(!has(&v) && has(&a));
+        let v = header(320, 240, PixelOrder::Bgrx, 33_333_333, 0, 48_000);
+        let a = header(320, 240, PixelOrder::Bgrx, 33_333_333, 3, 48_000);
+        let count = |h: &[u8]| h.windows(13).filter(|w| *w == b"A_PCM/INT/LIT").count();
+        assert_eq!((count(&v), count(&a)), (0, 3));
         // 48 000 as a big-endian double, after SamplingFrequency's ID and size.
         let mut freq = vec![0xb5, 0x88];
         freq.extend(48_000f64.to_be_bytes());

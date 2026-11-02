@@ -4,7 +4,9 @@
 # with a region (slurp format) that records on this desktop. Starts a sound
 # server first: pipewire-pulse where PipeWire is installed (GNOME's image),
 # PulseAudio otherwise, so both are tested. A null sink stands in for the
-# sound card, and ffmpeg plays a 1 kHz tone into it.
+# sound card, and ffmpeg plays a 1 kHz tone into it. A second null sink,
+# "mic", stands in for a microphone: its monitor is the default source, and
+# gets a 440 Hz tone, so each source can be told apart by frequency.
 
 sound_server() {
   if command -v pipewire-pulse >/dev/null; then
@@ -16,12 +18,20 @@ sound_server() {
   fi
   for _ in $(seq 50); do pactl info >/dev/null 2>&1 && break; sleep 0.1; done
   pactl load-module module-null-sink sink_name=clipt >/dev/null
+  pactl load-module module-null-sink sink_name=mic >/dev/null
   pactl set-default-sink clipt
+  pactl set-default-source mic.monitor
   pactl info | sed -n 's/^Server Name: /  sound server: /p'
 }
 
-tone_on()  { ffmpeg -nostdin -loglevel error -re -f lavfi -i sine=frequency=1000:sample_rate=48000 -ac 2 -f pulse -device clipt tone & TONE=$!; }
-tone_off() { kill $TONE 2>/dev/null; wait $TONE 2>/dev/null; }
+# tone_on [FREQ SINK]: 1 kHz into the system sink by default.
+tone_on()  { ffmpeg -nostdin -loglevel error -re -f lavfi -i sine=frequency=${1:-1000}:sample_rate=48000 -ac 2 -f pulse -device ${2:-clipt} tone & TONES="${TONES:-} $!"; }
+tone_off() { kill $TONES 2>/dev/null; wait $TONES 2>/dev/null; TONES=; }
+# band_db FILE TRACK FREQ: mean level of one frequency in sound track TRACK
+# (0-based), from 2 s in (PulseAudio's first second or so is silent).
+band_db()  { ffmpeg -nostats -ss 2 -i "$1" -map 0:a:$2 -af "bandpass=f=$3:width_type=q:w=20,volumedetect" -f null - 2>&1 | sed -n 's/.*mean_volume: \(-*[0-9.]*\) dB/\1/p'; }
+# Track names: Matroska's titles, or MP4's handler names.
+titles()   { ffprobe -v error -select_streams a -show_entries stream_tags=title,handler_name -of default=nw=1:nk=1 "$1" 2>/dev/null | tr '\n' ',' | sed 's/,$//'; }
 # Mean and peak level of a file's sound, in dB.
 mean_db()  { ffmpeg -nostats -i "$1" -map 0:a -af volumedetect -f null - 2>&1 | sed -n 's/.*mean_volume: \(-*[0-9.]*\) dB/\1/p'; }
 max_db()   { ffmpeg -nostats -i "$1" -map 0:a -af volumedetect -f null - 2>&1 | sed -n 's/.*max_volume: \(-*[0-9.]*\) dB/\1/p'; }
@@ -63,8 +73,40 @@ audio_tests() {
   sleep 1; /clipt record --stop; wait $rp
   check "--audio with --gif says GIFs have no sound, and still makes one" 'grep -q "GIFs have no sound" /tmp/snd.err && [ "$(head -c 6 /tmp/snd.gif)" = GIF89a ]'
 
-  /clipt record -g "$g" --audio=mic -o /tmp/snd-x.mp4 2>/tmp/snd.err
-  check "an unsupported source is refused ($(head -1 /tmp/snd.err))" 'grep -q "isn.t supported yet" /tmp/snd.err && [ ! -e /tmp/snd-x.mp4 ]'
-  PULSE_SERVER=unix:/nonexistent /clipt record -g "$g" --audio -o /tmp/snd-x.mp4 2>/tmp/snd.err
+  echo "-- recording: several sound sources"
+  /clipt list sound >/tmp/snd-list.txt 2>&1
+  check "clipt list sound marks what system and mic record ($(tr '\n\t' '; ' </tmp/snd-list.txt | cut -c1-90))" \
+    'grep -q "^clipt.monitor.*(system)" /tmp/snd-list.txt && grep -q "^mic.monitor.*(mic)" /tmp/snd-list.txt'
+
+  tone_on 1000 clipt; tone_on 440 mic; sleep 0.5
+  /clipt record -g "$g" --audio=system,mic --separate-audio -o /tmp/snd-2.mkv 2>/tmp/snd.err & rp=$!
+  sleep 4; /clipt record --stop; wait $rp
+  check "two sources with separate tracks: a mix and one per source ($(titles /tmp/snd-2.mkv))" '[ "$(titles /tmp/snd-2.mkv)" = "Mix,System sound,Microphone" ]'
+  local s1=$(band_db /tmp/snd-2.mkv 1 1000) s4=$(band_db /tmp/snd-2.mkv 1 440)
+  check "the system track has the 1 kHz tone and not the 440 Hz one (${s1} / ${s4} dB)" 'awk "BEGIN{exit !($s1 > -35 && $s1 - $s4 > 20)}"'
+  local m1=$(band_db /tmp/snd-2.mkv 2 1000) m4=$(band_db /tmp/snd-2.mkv 2 440)
+  check "the microphone track the reverse (${m4} / ${m1} dB)" 'awk "BEGIN{exit !($m4 > -35 && $m4 - $m1 > 20)}"'
+  local x1=$(band_db /tmp/snd-2.mkv 0 1000) x4=$(band_db /tmp/snd-2.mkv 0 440)
+  check "the mix has both, about equally (${x1} / ${x4} dB)" 'awk "BEGIN{d=($x1)-($x4); exit !($x1 > -35 && $x4 > -35 && d < 3 && d > -3)}"'
+
+  /clipt record -g "$g" --audio=system:100,mic:25 -o /tmp/snd-v.mp4 2>/tmp/snd.err & rp=$!
+  sleep 4; /clipt record --stop; wait $rp; rc=$?
+  x1=$(band_db /tmp/snd-v.mp4 0 1000); x4=$(band_db /tmp/snd-v.mp4 0 440)
+  check "volumes: mic at 25 % sits ~12 dB under system at 100 % ($(awk "BEGIN{print ($x4)-($x1)}") dB; $rc $(grep -iE 'error|can.t|fail|already' /tmp/snd.err | grep -v notification | head -1))" 'awk "BEGIN{d=($x4)-($x1); exit !(d < -9 && d > -15)}"'
+  check "without --separate-audio there's just the mix ($(titles /tmp/snd-v.mp4))" '[ "$(titles /tmp/snd-v.mp4)" = Mix ]'
+
+  /clipt record -g "$g" --audio=mic.monitor -o /tmp/snd-n.mp4 2>/tmp/snd.err & rp=$!
+  sleep 3.5; /clipt record --stop; wait $rp
+  m4=$(band_db /tmp/snd-n.mp4 0 440); m1=$(band_db /tmp/snd-n.mp4 0 1000)
+  check "a device by name records it (${m4} dB at 440 Hz, ${m1} at 1 kHz)" 'awk "BEGIN{exit !($m4 > -35 && $m4 - $m1 > 20)}"'
+  tone_off
+
+  # Refusals run under a time limit: if one isn't refused, the recording
+  # would otherwise run until max_duration.
+  timeout -s INT 15 /clipt record -g "$g" --audio=system,nosuch -o /tmp/snd-x.mp4 2>/tmp/snd.err
+  check "an unknown device is refused, pointing at the list ($(head -1 /tmp/snd.err | cut -c1-70))" 'grep -q "no sound device .nosuch.*list sound" /tmp/snd.err && [ ! -e /tmp/snd-x.mp4 ]'
+  timeout -s INT 15 /clipt record -g "$g" --audio=system:900 -o /tmp/snd-x.mp4 2>/tmp/snd.err
+  check "an impossible volume is refused ($(head -1 /tmp/snd.err))" 'grep -q "outside 0 to 400" /tmp/snd.err && [ ! -e /tmp/snd-x.mp4 ]'
+  PULSE_SERVER=unix:/nonexistent timeout -s INT 15 /clipt record -g "$g" --audio -o /tmp/snd-x.mp4 2>/tmp/snd.err
   check "no sound server: refused before recording ($(head -1 /tmp/snd.err | cut -c1-70))" 'grep -q "can.t record sound" /tmp/snd.err && [ ! -e /tmp/snd-x.mp4 ]'
 }
