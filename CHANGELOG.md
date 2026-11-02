@@ -11,6 +11,10 @@ All notable changes are listed here. The format follows
   ducks the other sound under the microphone: the microphone's sound is
   cleaned up in the mix, and the other sources dip by about 11 dB while the
   voice speaks. Needs the microphone and at least one other source.
+- `--audio-balance=smart` ducks too, and at the stop says how clearly the
+  voice came through ("speech clarity 0.84, good"), and if it isn't good,
+  how much quieter the other sound should be; or, if the microphone hears
+  the speakers, how far the voice is over the rest.
 
 ### Fixed
 - A recording no longer hangs for ever if ffmpeg stalls at the end: after

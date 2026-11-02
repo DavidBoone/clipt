@@ -162,11 +162,16 @@ Overrides \fBrecord_audio\fR.
 Needs a PulseAudio or pipewire-pulse sound server; GIFs have no sound.
 .TP
 \fB\-\-audio\-balance\fR \fIMODE\fR
-Duck the other sound under the microphone: \fBoff\fR (the default) or
-\fBduck\fR.
+Duck the other sound under the microphone: \fBoff\fR (the default),
+\fBduck\fR or \fBsmart\fR.
 With \fBduck\fR, the microphone's sound is cleaned up (high-pass,
 compression, de-essing, a 3 kHz presence boost) in the mix only, and the
 other sources dip while the voice speaks.
+\fBsmart\fR does the same and, at the stop, says how clearly the voice
+came through: its speech clarity (the Speech Intelligibility Index of its
+quietest moments, 0.75 or more is good) and, below that, how much quieter
+the other sound should be; or, when the microphone also hears the
+speakers, how far the voice is over the rest.
 Needs the microphone and at least one other source; otherwise it changes
 nothing and says so.
 Overrides \fBrecord_audio_balance\fR.
@@ -293,8 +298,8 @@ Sound to record, as \fB\-\-audio\fR takes it: \fBnone\fR, \fBsystem\fR,
 \fBmic\fR, \fBboth\fR or a list such as \fB"system:70,mic:120"\fR.
 .TP
 \fBrecord_audio_balance\fR = \fI"off"\fR
-\fBoff\fR or \fBduck\fR, like \fB\-\-audio\-balance\fR: duck the other
-sound under the microphone.
+\fBoff\fR, \fBduck\fR or \fBsmart\fR, like \fB\-\-audio\-balance\fR: duck
+the other sound under the microphone.
 .TP
 \fBrecord_separate_audio\fR = \fIfalse\fR
 Also keep each sound source as its own track, like \fB\-\-separate\-audio\fR.

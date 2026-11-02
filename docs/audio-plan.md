@@ -2,8 +2,8 @@
 
 Status: phases 0–3 done (system sound; several sources, volumes, separate
 tracks, devices; overlay and tray controls, the Flatpak), 2026-11-01. Phase
-4 (smart balance) under way: the ffmpeg watchdog and `duck` done
-(2026-11-02); `smart` next.
+4 (smart balance) under way: the ffmpeg watchdog, `duck` and `smart`'s
+clarity report done (2026-11-02); the at-stop re-mix next.
 
 ## Goal
 
@@ -224,6 +224,27 @@ Done so far:
   pick a format between clipt's 16-bit sound and the compressor's doubles.
   An `aformat` fixes each. The Sway e2e test shows the system sound
   dipping 10.6 dB under the microphone.
+- **`smart`'s report** (`--audio-balance=smart`): `duck`, plus a second
+  ffmpeg output that sends the mix's inputs (after clean-up and ducking)
+  back to clipt as mono 48 kHz floats, measured in `src/record/clarity.rs`
+  and reported at the stop ("speech clarity 0.84, good"; with a leak, the
+  voice's median gap over the rest instead). The measurement is the
+  spike's, and reproduces its plain-bed table on the same recordings
+  (0.29, 0.61, 0.74, 0.85 at 0, 10, 15, 20 dB, against 0.30, 0.61, 0.74,
+  0.86). Decisions: speech frames are the spike's level gate (within 15 dB
+  of the voice's 90th percentile), not nnnoiseless, so no new dependency;
+  bands come from an FFT with sharp edges, because fourth-order Butterworth
+  bands let the voice's strong low end into the 4 and 8 kHz bands and read
+  0.12 high; the leak check counts windows whose other sound is above
+  −60 dBFS (quiet music is about −55 once ducked). On the readings a leak
+  20, 30 or 40 dB under the voice peaks at 0.83–0.90, a clean one at 0.13.
+  Under 0.5 % of a core. Below 0.75 it also says how much quieter the
+  other sound should be, computed from the frames already measured:
+  ducking's dip is set by the voice alone, so turning the other sources
+  down lowers them by exactly that in the mix. From the 10 dB recording it
+  predicts 6 dB (so 16 dB); remade at 15.5 dB it measures 0.748 and
+  predicts the same 16. So the at-stop re-mix, next, needs no search: one
+  pass at the computed volume.
 
 ## Smart balance (phase 4)
 

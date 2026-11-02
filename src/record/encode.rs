@@ -221,6 +221,8 @@ pub enum Balance {
     Off,
     /// Clean up the microphone's sound and duck the other sources under it.
     Duck,
+    /// `Duck`, and measure how clearly the voice comes through (`clarity`).
+    Smart,
 }
 
 impl Balance {
@@ -229,7 +231,8 @@ impl Balance {
         match s.trim() {
             "off" => Ok(Self::Off),
             "duck" => Ok(Self::Duck),
-            other => bail!("unknown audio balance '{other}' (off, duck)"),
+            "smart" => Ok(Self::Smart),
+            other => bail!("unknown audio balance '{other}' (off, duck, smart)"),
         }
     }
 }
@@ -279,6 +282,27 @@ pub struct Sound {
 }
 
 impl Sound {
+    /// The voice to duck under: `duck` and `smart` need the microphone and
+    /// something else.
+    fn ducking(&self) -> Option<usize> {
+        let n = self.volumes.len();
+        (self.balance != Balance::Off && n > 1).then_some(self.voice).flatten().filter(|&v| v < n)
+    }
+
+    /// Whether ffmpeg also sends back the mix's inputs for `clarity`.
+    pub fn analyses(&self) -> bool {
+        self.balance == Balance::Smart && self.ducking().is_some()
+    }
+
+    /// The second output, to clipt's pipe: the voice and each other source
+    /// as they go into the mix, mono, 48 kHz floats, voice first.
+    fn analysis_args(&self) -> Vec<String> {
+        if !self.analyses() {
+            return Vec::new();
+        }
+        ["-map", "[ana]", "-c:a", "pcm_f32le", "-f", "f32le", "pipe:1"].map(String::from).to_vec()
+    }
+
     /// ffmpeg arguments: the filter graph, the outputs to map after the video,
     /// and their names. MP4 and MOV keep a track's name as its handler name
     /// (what players show); Matroska as its title.
@@ -286,9 +310,8 @@ impl Sound {
         let name = if mov { "handler_name" } else { "title" };
         let n = self.volumes.len();
         let separate = self.separate && n > 1;
-        // `duck` needs the microphone and something to duck under it.
-        let duck = (self.balance == Balance::Duck && n > 1).then_some(self.voice).flatten().filter(|&v| v < n);
-        if self.balance == Balance::Duck && duck.is_none() {
+        let duck = self.ducking();
+        if self.balance != Balance::Off && duck.is_none() {
             eprintln!("clipt: audio balance: no microphone to duck under");
         }
         let mut graph = Vec::new();
@@ -303,10 +326,23 @@ impl Sound {
                 });
             }
         }
+        // For `smart`, each input to the mix is also sent back to clipt.
+        let into_mix = if let Some(voice) = duck.filter(|_| self.analyses()) {
+            let order = std::iter::once(voice).chain((0..n).filter(|&i| i != voice));
+            let mut merge = String::new();
+            for (k, i) in order.enumerate() {
+                graph.push(format!("[v{i}]asplit=2[u{i}][y{i}];[y{i}]pan=mono|c0=0.5*c0+0.5*c1[z{k}]"));
+                merge.push_str(&format!("[z{k}]"));
+            }
+            graph.push(format!("{merge}amerge=inputs={n},aformat=sample_fmts=flt[ana]"));
+            "u"
+        } else {
+            "v"
+        };
         let mix = if n == 1 {
             "v0".to_string()
         } else {
-            let ins: String = (0..n).map(|i| format!("[v{i}]")).collect();
+            let ins: String = (0..n).map(|i| format!("[{into_mix}{i}]")).collect();
             graph.push(format!("{ins}{MIX}:inputs={n}[mix]"));
             "mix".to_string()
         };
@@ -362,6 +398,8 @@ pub struct Encoder {
     child: Child,
     stdin: Option<ChildStdin>,
     stderr: Option<std::thread::JoinHandle<String>>,
+    /// For `smart`: what ffmpeg sends back, measured until it exits.
+    clarity: Option<std::thread::JoinHandle<Option<super::clarity::Report>>>,
 }
 
 impl Encoder {
@@ -385,11 +423,16 @@ impl Encoder {
             cmd.args(["-movflags", "+faststart"]);
         }
         cmd.arg(path);
+        let analyses = sound.is_some_and(Sound::analyses);
+        if let Some(s) = sound {
+            cmd.args(s.analysis_args());
+        }
         // Its own process group: Ctrl-C in the terminal reaches only clipt,
         // which then closes ffmpeg's input so it can finish the file.
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
-        let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().context("starting ffmpeg")?;
+        let stdout = if analyses { Stdio::piped() } else { Stdio::null() };
+        let mut child = cmd.stdin(Stdio::piped()).stdout(stdout).stderr(Stdio::piped()).spawn().context("starting ffmpeg")?;
         let stdin = child.stdin.take();
         let mut err = child.stderr.take().unwrap();
         let stderr = std::thread::spawn(move || {
@@ -397,7 +440,8 @@ impl Encoder {
             let _ = err.read_to_string(&mut s);
             s
         });
-        let mut enc = Self { child, stdin, stderr: Some(stderr) };
+        let clarity = child.stdout.take().map(|out| measure(out, sound.map_or(0, |s| s.volumes.len())));
+        let mut enc = Self { child, stdin, stderr: Some(stderr), clarity };
         let tracks = sound.map_or(0, |s| s.volumes.len());
         enc.send(&super::mkv::header(w, h, order, 1_000_000_000 / fps.max(1) as u64, tracks, super::audio::RATE))?;
         Ok(enc)
@@ -430,8 +474,9 @@ impl Encoder {
 
     /// Close the input and wait for ffmpeg to write out the file. Killed and
     /// reported if it hasn't exited within `FINISH_LIMIT`: the caller says
-    /// where the partial file is.
-    pub fn finish(mut self) -> Result<()> {
+    /// where the partial file is. For `smart`, returns how clearly the voice
+    /// came through.
+    pub fn finish(mut self) -> Result<Option<super::clarity::Report>> {
         drop(self.stdin.take());
         let Some(status) = wait_up_to(&mut self.child, FINISH_LIMIT)? else {
             kill(&mut self.child);
@@ -440,7 +485,8 @@ impl Encoder {
         if !status.success() {
             bail!("ffmpeg failed ({status}): {}", self.stderr_text());
         }
-        Ok(())
+        // ffmpeg has exited, so its output is closed and the measuring ends.
+        Ok(self.clarity.take().and_then(|h| h.join().ok()).flatten())
     }
 
     fn stderr_text(&mut self) -> String {
@@ -448,6 +494,38 @@ impl Encoder {
         let s = s.trim();
         if s.is_empty() { "no error output".into() } else { s.lines().last().unwrap_or(s).to_string() }
     }
+}
+
+/// Read what ffmpeg sends back for `smart` and measure it. The reading
+/// thread only reads, handing blocks to the measuring one, so ffmpeg (which
+/// stalls when its output pipe is full, holding up the recording) is never
+/// kept waiting by the measurement.
+fn measure(mut out: std::process::ChildStdout, channels: usize) -> std::thread::JoinHandle<Option<super::clarity::Report>> {
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut buf = vec![0u8; 1 << 16];
+        while let Ok(n) = out.read(&mut buf) {
+            if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    std::thread::spawn(move || {
+        let mut a = super::clarity::Analyzer::new(channels);
+        // Reads don't end on a frame's boundary; keep the partial one.
+        let frame = 4 * channels.max(1);
+        let mut carry = Vec::new();
+        let mut samples = Vec::new();
+        for block in rx {
+            carry.extend_from_slice(&block);
+            let whole = carry.len() / frame * frame;
+            samples.clear();
+            samples.extend(carry[..whole].as_chunks::<4>().0.iter().map(|&b| f32::from_le_bytes(b)));
+            carry.drain(..whole);
+            a.push(&samples);
+        }
+        a.report()
+    })
 }
 
 /// Turn a finished recording into a GIF: a palette made from the whole clip,
@@ -697,7 +775,16 @@ mod tests {
         assert!(graph(&three).contains("[key]asplit=2[k0][k2]"), "{}", graph(&three));
         assert_eq!(Balance::parse("off").unwrap(), Balance::Off);
         assert_eq!(Balance::parse("duck").unwrap(), Balance::Duck);
-        assert!(Balance::parse("smart").is_err(), "smart is a later phase");
+        assert_eq!(Balance::parse("smart").unwrap(), Balance::Smart);
+        assert!(Balance::parse("loud").is_err());
+        // `smart` is `duck` with each input to the mix also sent back.
+        let smart = s(&[0.7, 1.0], false, Some(1), Balance::Smart);
+        assert!(graph(&smart).starts_with(&graph(&duck).replace(&format!(";[v0][v1]{MIX}:inputs=2[mix]"), "")), "{}", graph(&smart));
+        assert!(graph(&smart).ends_with(&format!("[z0][z1]amerge=inputs=2,aformat=sample_fmts=flt[ana];[u0][u1]{MIX}:inputs=2[mix]")));
+        assert!(graph(&smart).contains("[v1]asplit=2[u1][y1];[y1]pan=mono|c0=0.5*c0+0.5*c1[z0]"), "the voice comes first");
+        assert_eq!(smart.analysis_args(), ["-map", "[ana]", "-c:a", "pcm_f32le", "-f", "f32le", "pipe:1"]);
+        assert!(duck.analysis_args().is_empty());
+        assert!(!s(&[1.0, 1.0], false, None, Balance::Smart).analyses(), "no microphone, nothing to measure");
     }
 
     /// Mean level (dBFS) of a lavfi `source` through a filter graph from
@@ -741,6 +828,59 @@ mod tests {
                 cleaned - raw
             );
         }
+    }
+
+    /// The `smart` graph through ffmpeg: a voice with pauses over a bed 20 dB
+    /// under it comes back measured, as clear and not leaking.
+    #[test]
+    fn smart_measures_what_goes_into_the_mix() {
+        let _ffmpeg = FFMPEG.lock().unwrap_or_else(|e| e.into_inner());
+        if Command::new("ffmpeg").arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("clipt-smart-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("in.mkv");
+        // Source 0: pink noise as the bed; source 1: the microphone, noise
+        // in syllables with pauses. 16-bit stereo, as clipt sends.
+        let made = Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:s=64x64:d=12"])
+            .args(["-f", "lavfi", "-i", "anoisesrc=c=pink:a=0.02:d=12:r=48000"])
+            .args(["-f", "lavfi", "-i", "anoisesrc=c=pink:a=0.2:d=12:r=48000:seed=7"])
+            .args(["-filter_complex", "[2:a]volume='if(lt(mod(t,4),2.8),if(lt(mod(t,0.4),0.25),1,0.3),0)':eval=frame[mic]"])
+            .args(["-map", "0:v", "-map", "1:a", "-map", "[mic]", "-ac", "2", "-c:v", "rawvideo", "-c:a", "pcm_s16le"])
+            .arg(&input)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let smart = Sound {
+            volumes: vec![1.0, 1.0],
+            labels: vec!["System".into(), "Microphone".into()],
+            separate: false,
+            voice: Some(1),
+            balance: Balance::Smart,
+        };
+        let out = Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+            .arg(&input)
+            .args(smart.args(false))
+            .args(["-c:v", "rawvideo"])
+            .arg(dir.join("out.mkv"))
+            .args(smart.analysis_args())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let samples: Vec<f32> = out.stdout.as_chunks::<4>().0.iter().map(|&b| f32::from_le_bytes(b)).collect();
+        assert!((samples.len() as f32 / 2.0 / 48_000.0 - 12.0).abs() < 0.5, "{} samples", samples.len());
+        let mut a = super::super::clarity::Analyzer::new(2);
+        a.push(&samples);
+        let r = a.report().unwrap();
+        // Ducked about 11 dB, the bed ends up well under a voice it was
+        // 20 dB under: clear.
+        use super::super::clarity::{Leak, Report};
+        assert!(matches!(r, Report::Measured { clarity, leak: Leak::NotHeard, .. } if clarity > 0.9), "{r:?}");
     }
 
     #[test]
