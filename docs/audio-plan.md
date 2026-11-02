@@ -1,6 +1,7 @@
 # Audio in recordings: implementation plan
 
-Status: proposed, 2026-11-01. Nothing built yet.
+Status: proposed, 2026-11-01. Phase 0 (spike) done; nothing built in clipt
+yet.
 
 ## Goal
 
@@ -33,10 +34,15 @@ for, so nobody's microphone is recorded by surprise.
 ```
 
 - **Audio source** (`src/record/audio.rs`): one thread per source, blocking
-  in `pa_simple_read` on 20 ms chunks (1 920 bytes at 48 kHz, 16-bit
-  stereo). Each chunk is stamped with when its first sample was heard: the
-  monotonic time when the read returned, minus the chunk's length and the
-  latency `pa_simple_get_latency` reports. Chunks go to the writer through a
+  in `pa_simple_read` on 20 ms chunks (3 840 bytes at 48 kHz, 16-bit
+  stereo; `fragsize` set to match, or the server hands over much larger
+  fragments). Chunks are stamped by a sample clock: an anchor plus the
+  samples read so far, divided by 48 000. Each read gives one estimate of the
+  anchor: when the read returned, minus the reported latency and the
+  samples read. Reads can only return late, never early, so the anchor is
+  the earliest estimate over the last 10 s (the window lets it follow clock
+  drift). Stamping each chunk from its own read time instead jitters by
+  ±15 ms (see the spike results). Chunks go to the writer through a
   bounded queue. Audio can't be dropped the way video frames are without
   causing gaps, but a full queue means ffmpeg has stalled, so it ends the
   recording with an error rather than eating memory.
@@ -54,7 +60,7 @@ for, so nobody's microphone is recorded by surprise.
 - **Encoder** (`src/record/encode.rs`): maps the audio tracks and adds
   `-c:a aac -b:a 160k`. A resampling filter (`aresample=async=1`) takes up
   the slow drift between the sound card's clock and the system clock
-  (typically tens of parts per million, a few tenths of a second per hour)
+  (under 2 parts per million in the spike, but other hardware can do worse)
   and fills any tiny gap between chunks. With two sources:
   `amix=inputs=2:duration=longest:normalize=0`, so neither source is
   halved in volume.
@@ -65,16 +71,18 @@ Both are stamped on the monotonic clock at capture, so they line up by
 construction. What can still go wrong, and the answer to each:
 
 - **Latency guesses.** If `pa_simple_get_latency` is off, everything is
-  shifted by a constant. Phase 0 measures this with a beep and a flash.
-  If it's off, a fixed correction, and a `record_audio_offset_ms` setting
-  as the escape hatch.
-- **Clock drift** over long recordings: the resampler above, and an
-  hour-long test in phase 0.
+  shifted by a constant. In the spike it was 3–6 ms early once settled, too
+  small to correct. A `record_audio_offset_ms` setting stays as the escape
+  hatch for setups that measure worse.
+- **Clock drift** over long recordings: under 2 parts per million in the
+  spike (about 7 ms an hour), and the resampler above for hardware that
+  drifts more.
 - **Still screens.** On a still screen ffmpeg gets audio and no video for a
-  long time. Its muxer waits up to 10 s (`max_interleave_delta`) for the
-  other stream before writing, which is harmless for a file. If phase 0 shows
-  otherwise, the writer re-sends the last frame once a second while audio
-  is on, which costs almost nothing.
+  long time. Its muxer holds the audio until video catches up (in the spike
+  an MP4 stayed at 48 bytes through 14.5 s of still screen), and the result
+  is still in sync. That only matters if ffmpeg is killed: a crash loses
+  that much audio, and an MP4 without its index at the end is unplayable
+  anyway. So the writer doesn't need to re-send frames.
 - **Pause.** No sound is captured while paused, and audio after resuming
   is shifted back by the same paused time as the video, so the cut is in
   the same place in both.
@@ -123,11 +131,8 @@ construction. What can still go wrong, and the answer to each:
 
 Each phase ends with something usable, tests in CI, and a PR.
 
-**0. Spike.** Load libpulse-simple and read `@DEFAULT_MONITOR@` in the
-Sway container. Measure reported against real latency (beep and flash)
-and drift against the monotonic clock over an hour. Pipe a Matroska
-stream with PCM and sparse video through ffmpeg and check the MP4's sync and
-duration. Results recorded here, decisions revisited if needed.
+**0. Spike (done 2026-11-01).** libpulse-simple through Python's ctypes,
+and a Python Matroska writer copying clipt's. See the spike results below.
 
 **1. System sound.** `audio.rs`, Matroska audio track, writer
 interleaving, AAC encoding, pause, `--audio` and `record_audio` (`none` and
@@ -138,6 +143,49 @@ test, the microphone-missing error.
 
 **3. Controls and packaging.** Overlay toggle, tray checkbox, Flatpak
 permission and ffmpeg components, man page, completions, README, CHANGELOG.
+
+## Spike results (2026-11-01)
+
+Python scripts, not clipt code, so the numbers are about the approach.
+PipeWire 1.6 with pipewire-pulse throughout.
+
+**Timestamps.** A null sink in a container. The test played 1 kHz beeps at
+moments known from the playback stream's own sample clock, recorded its
+monitor, and compared each beep's recorded start with its played start,
+15 beeps per run, three runs:
+
+| Stamping | Recorded minus played | Spread |
+|---|---|---|
+| Each chunk from its own read time, minus latency | −3.3 to −4.7 ms mean | 28–32 ms, the same sawtooth every run |
+| Sample clock, earliest anchor | −3 to −6 ms once settled (after ~4 s); up to +11 ms before | under 0.5 ms once settled |
+
+The sawtooth is probably PipeWire processing in 1 024-sample (21.3 ms)
+blocks against 20 ms reads, so reads return in bursts. The sample clock
+removes it. The first seconds' error is the anchor still settling; it is
+under one frame at 60 fps, and the writer already holds audio back for
+200 ms, so stamps could be fixed up before sending if it ever matters.
+
+**ffmpeg.** A Matroska stream from the spike writer: black frames at 0 and
+0.5 s, a white frame at 15 s, a black one at 20 s, and continuous PCM with
+beeps at 1 s and 15 s. Encoded with clipt's libx264 arguments plus
+`-c:a aac -b:a 160k -af aresample=async=1`:
+
+- MP4, MOV and MKV: the beeps at 1.000 and 15.000 s (±0.3 ms), and the
+  flash at 15.000 s. ffmpeg handles AAC's start-up delay itself.
+- Written in real time, with 14.5 s of still screen: the same result. The
+  MP4 stayed at 48 bytes during the still screen (see *Still screens*).
+- ffmpeg warns `Guessed Channel Layout: stereo`, which is right. Matroska
+  has no channel-layout element; clipt's `-loglevel error` hides it.
+
+**Drift.** libpulse-simple on a desktop with a Focusrite Scarlett Solo
+(USB), counting samples from `@DEFAULT_MONITOR@` against the monotonic
+clock for 10 minutes, with a silent stream playing so the sound card was
+running and timing the graph. The difference never passed ±1.1 ms and
+didn't build up: under 2 parts per million, so at most about 7 ms over an
+hour. The resampler's drift correction is a safety net, not a necessity,
+on hardware like this. A second run, where the card may have been idle,
+agreed (±1.5 ms over 4 minutes). Other sound cards, and Bluetooth, may
+drift more.
 
 ## Risks
 
