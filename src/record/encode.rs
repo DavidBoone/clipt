@@ -19,6 +19,45 @@ use anyhow::{Context, Result, bail};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::time::{Duration, Instant};
+
+/// How long `Encoder::finish` waits for ffmpeg to exit after its input
+/// closes: encoders flush their buffer in well under a second.
+#[cfg(not(test))]
+const FINISH_LIMIT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const FINISH_LIMIT: Duration = Duration::from_millis(500);
+
+/// How long `to_gif` may take: it reads the whole recording, so its limit
+/// scales with the recording (60 s plus twice its length).
+#[cfg(not(test))]
+fn gif_limit(duration: Duration) -> Duration {
+    Duration::from_secs(60) + duration.saturating_mul(2)
+}
+#[cfg(test)]
+fn gif_limit(_duration: Duration) -> Duration {
+    Duration::from_millis(500)
+}
+
+/// Wait for `child` to exit, at most `limit`; `None` means it's still running.
+fn wait_up_to(child: &mut Child, limit: Duration) -> Result<Option<std::process::ExitStatus>> {
+    let deadline = Instant::now() + limit;
+    loop {
+        if let Some(status) = child.try_wait().context("waiting for ffmpeg")? {
+            return Ok(Some(status));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// SIGKILL and reap: a hung ffmpeg has already ignored SIGTERM.
+fn kill(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Codec {
@@ -290,10 +329,15 @@ impl Encoder {
         Ok(())
     }
 
-    /// Close the input and wait for ffmpeg to write out the file.
+    /// Close the input and wait for ffmpeg to write out the file. Killed and
+    /// reported if it hasn't exited within `FINISH_LIMIT`: the caller says
+    /// where the partial file is.
     pub fn finish(mut self) -> Result<()> {
         drop(self.stdin.take());
-        let status = self.child.wait().context("waiting for ffmpeg")?;
+        let Some(status) = wait_up_to(&mut self.child, FINISH_LIMIT)? else {
+            kill(&mut self.child);
+            bail!("ffmpeg didn't finish within {FINISH_LIMIT:?}, so it was killed: {}", self.stderr_text());
+        };
         if !status.success() {
             bail!("ffmpeg failed ({status}): {}", self.stderr_text());
         }
@@ -308,20 +352,41 @@ impl Encoder {
 }
 
 /// Turn a finished recording into a GIF: a palette made from the whole clip,
-/// then the clip mapped onto it, at most `fps` frames a second.
-pub fn to_gif(mp4: &Path, gif: &Path, fps: u32) -> Result<()> {
+/// then the clip mapped onto it, at most `fps` frames a second. `duration` is
+/// the recording's length; it scales how long ffmpeg may take. Killed and
+/// reported if it takes longer, leaving the MP4 for the caller.
+pub fn to_gif(mp4: &Path, gif: &Path, fps: u32, duration: Duration) -> Result<()> {
     let filter =
         format!("fps={fps},split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle");
-    let r = Command::new("ffmpeg")
+    let mut child = Command::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
         .arg(mp4)
         .args(["-vf", &filter, "-loop", "0"])
         .arg(gif)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("running ffmpeg")?;
-    if !r.status.success() {
-        bail!("making the GIF failed: {}", String::from_utf8_lossy(&r.stderr).trim());
+    // Read its errors on a thread, so a chatty ffmpeg can't fill the pipe and
+    // block while we wait for it.
+    let mut err = child.stderr.take().unwrap();
+    let stderr = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = err.read_to_string(&mut s);
+        s
+    });
+    let limit = gif_limit(duration);
+    let status = wait_up_to(&mut child, limit)?;
+    if status.is_none() {
+        kill(&mut child);
+    }
+    let stderr = stderr.join().unwrap_or_default();
+    let Some(status) = status else {
+        bail!("making the GIF failed: ffmpeg didn't finish within {limit:?}, so it was killed");
+    };
+    if !status.success() {
+        bail!("making the GIF failed: {}", stderr.trim());
     }
     Ok(())
 }
@@ -335,6 +400,97 @@ fn debug(msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// The ffmpeg tests must not overlap: the stand-in ffmpeg goes first on
+    /// the process-wide PATH.
+    static FFMPEG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A stand-in `ffmpeg` first on PATH that ignores its input and hangs,
+    /// like the ffmpeg that stopped at the end of its input in the audio
+    /// spike. It writes its pid to a file in its temp dir, which is removed
+    /// and PATH restored when dropped.
+    struct HungFfmpeg {
+        dir: std::path::PathBuf,
+        pid: std::path::PathBuf,
+        path: Option<std::ffi::OsString>,
+    }
+
+    impl HungFfmpeg {
+        /// The caller must hold `FFMPEG`.
+        fn install() -> Self {
+            let dir = std::env::temp_dir().join(format!("clipt-hung-ffmpeg-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let pid = dir.join("ffmpeg.pid");
+            let script = dir.join("ffmpeg");
+            std::fs::write(&script, format!("#!/bin/sh\necho $$ > '{}'\nexec sleep 600\n", pid.display())).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let path = std::env::var_os("PATH");
+            let mut dirs = vec![dir.clone()];
+            dirs.extend(path.iter().flat_map(|p| std::env::split_paths(p)));
+            // Safe: every test that runs ffmpeg takes `FFMPEG` first.
+            unsafe { std::env::set_var("PATH", std::env::join_paths(dirs).unwrap()) };
+            Self { dir, pid, path }
+        }
+
+        /// Wait until the stand-in has started, and return its pid.
+        fn wait_started(&self) -> u32 {
+            let start = Instant::now();
+            while !self.pid.exists() {
+                assert!(start.elapsed() < Duration::from_secs(10), "the stand-in ffmpeg never started");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::fs::read_to_string(&self.pid).unwrap().trim().parse().unwrap()
+        }
+    }
+
+    impl Drop for HungFfmpeg {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.path {
+                    Some(p) => std::env::set_var("PATH", p),
+                    None => std::env::remove_var("PATH"),
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// The stand-in was killed, not left running.
+    fn assert_gone(pid: u32) {
+        // Signal 0 checks for the process without sending it anything.
+        let alive = unsafe { libc::kill(pid as i32, 0) } == 0;
+        assert!(!alive, "ffmpeg (pid {pid}) is still running");
+    }
+
+    #[test]
+    fn finish_kills_a_hung_ffmpeg() {
+        let _ffmpeg = FFMPEG.lock().unwrap_or_else(|e| e.into_inner());
+        let fake = HungFfmpeg::install();
+        let enc = Encoder::spawn(&Codec::X264, 16, 16, PixelOrder::Bgrx, 30, None, Path::new("/nonexistent/out.mp4")).unwrap();
+        let pid = fake.wait_started();
+        let start = Instant::now();
+        let e = enc.finish().unwrap_err();
+        assert!(start.elapsed() < Duration::from_secs(10), "finish waited too long");
+        assert!(format!("{e:#}").contains("didn't finish"), "{e:#}");
+        assert_gone(pid);
+    }
+
+    #[test]
+    fn to_gif_kills_a_hung_ffmpeg_and_keeps_the_mp4() {
+        let _ffmpeg = FFMPEG.lock().unwrap_or_else(|e| e.into_inner());
+        let fake = HungFfmpeg::install();
+        let mp4 = fake.dir.join("in.mp4");
+        let gif = fake.dir.join("out.gif");
+        std::fs::write(&mp4, b"a recording").unwrap();
+        let start = Instant::now();
+        let e = to_gif(&mp4, &gif, 10, Duration::from_secs(5)).unwrap_err();
+        assert!(start.elapsed() < Duration::from_secs(10), "to_gif waited too long");
+        assert!(format!("{e:#}").contains("didn't finish"), "{e:#}");
+        assert_gone(fake.wait_started());
+        assert!(mp4.exists(), "the MP4 must be kept");
+    }
 
     #[test]
     fn x264_preset_drops_above_1440p() {
@@ -357,6 +513,7 @@ mod tests {
     /// every sound recording fail the check). Needs ffmpeg; passes without.
     #[test]
     fn aac_check_runs() {
+        let _ffmpeg = FFMPEG.lock().unwrap_or_else(|e| e.into_inner());
         if Command::new("ffmpeg").arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_err() {
             return;
         }

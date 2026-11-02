@@ -478,13 +478,14 @@ pub fn run(cfg: &Config, opts: Options) -> Result<()> {
         });
     }
 
-    let mut result = write_loop(cfg, &lock, &slot, &codec, fps, zoom, sound.as_ref(), &path, &captured);
-    if gif && result.is_ok() {
-        result = encode::to_gif(&path, &target, fps.min(15)).map(|()| {
+    let result = match (write_loop(cfg, &lock, &slot, &codec, fps, zoom, sound.as_ref(), &path, &captured), gif) {
+        (Ok((_, duration)), true) => encode::to_gif(&path, &target, fps.min(15), duration).map(|()| {
             let _ = std::fs::remove_file(&path);
             "GIF".to_string()
-        });
-    }
+        }),
+        (Ok((stats, _)), false) => Ok(stats),
+        (Err(e), _) => Err(e),
+    };
     match &result {
         Ok(stats) => {
             println!("{}", target.display());
@@ -721,7 +722,7 @@ fn write_loop(
     sound: Option<&encode::Sound>,
     path: &Path,
     captured: &std::sync::atomic::AtomicU64,
-) -> Result<String> {
+) -> Result<(String, Duration)> {
     let (m, cv) = &**slot;
     // Window recordings: frames of changing size go through the camera.
     let mut cam: Option<camera::Camera> = None;
@@ -928,7 +929,7 @@ fn write_loop(
             eprintln!("clipt: {chunks} sound chunks sent from {sources} source(s) ({:.1} s each)", chunks as f64 * 0.02 / sources as f64);
         }
     }
-    Ok(format!("{secs:.0} s, {}{}", codec.name(), if sources > 0 { ", AAC" } else { "" }))
+    Ok((format!("{secs:.0} s, {}{}", codec.name(), if sources > 0 { ", AAC" } else { "" }), Duration::from_millis(end)))
 }
 
 /// The pauses so far, in order; the last may still be running.
