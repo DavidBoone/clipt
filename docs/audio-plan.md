@@ -1,7 +1,8 @@
 # Audio in recordings: implementation plan
 
 Status: phases 0–2 done (system sound; microphone, several sources, volumes,
-separate tracks, devices), 2026-11-01. Phase 3 (controls, Flatpak) next.
+separate tracks, devices), 2026-11-01. Phase 3 (controls, Flatpak) next;
+phase 4 (smart balance) proposed.
 
 ## Goal
 
@@ -183,6 +184,101 @@ source that has delivered nothing after 5 s stops the recording.
 permission and ffmpeg components (now also `asplit`, `amix` and `volume`).
 The man page, completions, README and CHANGELOG already cover phases 1
 and 2.
+
+**4. Smart balance (proposed).** Keeping a voice intelligible over the
+desktop's sound, from the voice-over-music rules below. Starts with a
+spike.
+
+## Smart balance (phase 4)
+
+clipt has the voice and the other sources as separate streams before they
+are mixed, which is what this needs. A setting such as
+`record_audio_balance = "off" | "duck" | "smart"` (default `off`):
+
+| Step | How | When | In |
+|---|---|---|---|
+| Voice clean-up: high-pass ~80 Hz, ~3:1 compression for 4–8 dB of gain reduction, de-essing, 2–4 kHz presence boost | ffmpeg `highpass`, `acompressor`, `deesser`, `equalizer` on the voice source | While recording | `duck`, `smart` |
+| Ducking: the other sources dip while the voice is present, attack 10–50 ms, release 200–500 ms | `sidechaincompress` on each other source, keyed by a split of the voice | While recording | `duck`, `smart` |
+| Dynamic EQ: 3–6 dB cut at 1–4 kHz in the other sources only while the voice is present | `acrossover` splits them at 1 and 4 kHz; only the middle band goes through `sidechaincompress`; the bands are summed again | While recording | `smart` |
+| Measuring intelligibility: Speech Intelligibility Index (ANSI S3.5, octave bands) | In clipt, on the PCM chunks it already handles: octave-band filters at 250 Hz–8 kHz, levels per ~400 ms frame for the voice and for the rest, SII = Σ Iᵢ·clamp((SNRᵢ + 15)/30, 0, 1) with weights 0.062, 0.167, 0.237, 0.265, 0.214, 0.055. Judged on the 10th-percentile frame | Reported at stop ("speech clarity 0.84, good") | `smart` |
+| Fixing it | If the 10th-percentile SII is under 0.75 (or 0.90 for a safe margin), mix again from the separate tracks with the other sources lower until it isn't; sound is re-encoded, video copied | At stop | `smart` |
+| Loudness: −14 LUFS integrated, −1 dBTP | `loudnorm`, two passes, on the final mix, video copied | At stop | opt-in setting |
+
+To settle first:
+- **Which source is the voice.** `mic` by default; a named device would
+  need marking, for example `--audio=system,alsa_input…:voice`.
+- **Only frames with speech count.** Between sentences the voice's SNR is
+  meaningless and would drag the 10th percentile down, so the measurement
+  needs voice activity detection on the voice (see below).
+- **Speakers spoil it.** Through speakers the microphone also hears the
+  desktop, so its track looks clearer than it is and SII reads high.
+  Headphones keep it honest; clipt could say so when it can't tell.
+- **SII treats music as steady noise.** Judging the 10th percentile helps;
+  the broadband rules of thumb (other sound 15 dB under the voice, 20 dB
+  if it has singing or talking, 10–12 dB with the dynamic EQ) are the
+  sanity check.
+- **Testing needs speech-like sound.** Steady tones won't trigger ducking
+  the way speech does; speech-shaped, syllable-rate modulated noise can
+  stand in for a voice in the e2e tests.
+
+### Telling what's playing
+
+Two questions, answered on separate threads fed from the chunks the writer
+already handles (never in the reading thread, so a slow analysis can't hold
+up a read; no real-time callback is involved, so no lock-free ring buffer
+is needed either):
+
+- **Is someone speaking?** (the voice source) **nnnoiseless**, a pure-Rust
+  port of RNNoise: no model file, no ONNX Runtime, BSD-3-Clause (allowed
+  by `deny.toml`). It works at 48 kHz on 10 ms frames, so each 20 ms chunk
+  is two frames and nothing is resampled, and it returns a voice
+  probability per frame. It's also a denoiser, which could later cover
+  noise suppression. Silero VAD is more accurate but needs ONNX Runtime (a
+  native library few have) or tract (megabytes more); webrtc-vad compiles
+  C into the binary (harder for the cross-compiled release targets) and is
+  weaker against background noise. A separate, mostly clean voice source
+  should be within nnnoiseless's reach; the spike checks it.
+- **What is the rest: music with vocals, instrumental music, or noise?**
+  It picks the target in the broadband rule: 20 dB under the voice for
+  singing or other talkers (competing speech masks beyond its energy,
+  which SII doesn't capture), 15 dB otherwise. Open until the spike, in
+  order of cost:
+  1. No model: assume the safe 20 dB, or take a hint
+     (`background = "vocals" | "instrumental" | "noise"`).
+  2. YAMNet (AudioSet's 521 classes: summed speech-and-singing scores
+     against music scores, an RMS gate to skip silence, decisions smoothed
+     over a few windows), behind a cargo feature. Its ~3.7 M parameters
+     are about 15 MB, three times clipt's binary, so the model would be
+     downloaded on first use to `~/.local/share/clipt/models` and checked
+     against a known hash, not built in. It would run through `tract`
+     (pure Rust; `ort` loads ONNX Runtime, which few have) on 0.96 s
+     windows every 0.48 s at 16 kHz, so this path does resample (`rubato`
+     or a simple polyphase filter), on one thread, loaded before recording
+     starts. The Flatpak has no network access, so it would ship the
+     model. The licence of the ONNX export's weights needs checking.
+
+Libraries, if the measurement moves into clipt: the octave-band filters
+are a few biquads, about 30 lines, so written here rather than a crate
+(`biquad` would do, pure Rust); an FFT (`realfft`) is more than six bands
+need and adds to the binary. `ebur128` (pure Rust, MIT) for short-term
+loudness per stream, if the broadband rules are checked live; the −14 LUFS
+master stays with ffmpeg's `loudnorm`. Not `cpal`: on Linux it links ALSA
+(and libpulse or libpipewire with those features), which clipt avoids so
+it starts without them, and it doesn't readily record the output's monitor.
+No lock-free ring buffer either: sound is read with blocking reads on its
+own thread, not in a real-time callback.
+
+Spike:
+- A recording of speech over music, mixed plain, ducked, and ducked with
+  the dynamic EQ; SII at the 10th percentile for each, against the targets
+  and the rules of thumb. It decides whether the at-stop fix is needed or
+  ducking alone gets there, and settles the ducking settings.
+- nnnoiseless on a real voice track, with pauses and some background
+  noise: how well its voice probability marks speech, and CPU per 20 ms.
+- YAMNet through tract on music with and without vocals, and on noise:
+  how often it's right after smoothing, CPU per window, the binary size
+  it adds and its load time. It decides whether the model earns its
+  weight over the 20 dB default.
 
 ## Spike results (2026-11-01)
 
