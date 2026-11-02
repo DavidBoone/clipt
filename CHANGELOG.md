@@ -6,6 +6,8 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-02
+
 ### Added
 - The screenshot overlay can record a video instead: click **Video** in the
   Screenshot | Video switch at the bottom of the screen, the camera button
