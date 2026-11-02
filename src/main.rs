@@ -57,9 +57,10 @@ OPTIONS:
                           comma-separated, each with an optional :PERCENT
                           volume in the mix, e.g. system:70,mic:120
         --audio-balance MODE
-                          Duck the other sound under the microphone: off or
-                          duck (default: off; needs the microphone and at
-                          least one other source)
+                          Duck the other sound under the microphone: off,
+                          duck, or smart (duck, and say at the stop how
+                          clearly the voice came through). Default: off;
+                          needs the microphone and at least one other source
         --separate-audio  Also keep each sound source as its own track
         --no-audio        Record without sound, whatever record_audio says
     -h, --help            Show this help

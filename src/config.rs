@@ -39,7 +39,7 @@ pub struct Config {
     /// Sound to record: none, system, mic, both, or a list of sources with
     /// volumes, as `--audio` takes it.
     pub record_audio: String,
-    /// Duck the other sound under the microphone: off or duck.
+    /// Duck the other sound under the microphone: off, duck or smart.
     pub record_audio_balance: String,
     /// Also keep each sound source as its own track.
     pub record_separate_audio: bool,

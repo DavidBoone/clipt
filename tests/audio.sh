@@ -143,6 +143,21 @@ audio_tests() {
   check "off: the system sound keeps its level while the microphone plays (${b} / ${d} dB)" \
     'awk "BEGIN{exit !($b > -35 && $d > -35 && ($b - $d) < 3 && ($d - $b) < 3)}"'
 
+  # smart ducks the same way, and says at the stop how clearly the voice
+  # came through (two tones aren't speech, so only that it says).
+  tone_on 1000 clipt; sleep 0.5
+  CLIPT_DEBUG=1 /clipt record -g "$g" --audio=both --audio-balance=smart -o /tmp/snd-smart.mp4 2>/tmp/snd.err & rp=$!
+  sleep 3.5
+  mic_tone_on; sleep 4.5
+  mic_tone_off; sleep 3.5
+  /clipt record --stop; wait $rp; rc=$?
+  tone_off
+  d=$(band_db_seg /tmp/snd-smart.mp4 5.0 1.5 0 1000)
+  b=$(band_db_seg /tmp/snd-smart.mp4 2.0 1.0 0 1000)
+  check "smart: ducks, and reports clarity ($(grep -E 'speech clarity|hears the other' /tmp/snd.err | head -1 | sed 's/^clipt: //'); ${b} / ${d} dB; rc=$rc)" \
+    '[ $rc = 0 ] && grep -qE "speech clarity|hears the other sound" /tmp/snd.err && awk "BEGIN{exit !($b - $d >= 8)}"'
+  grep -E "clarity:" /tmp/snd.err | sed 's/^clipt: /  /'
+
   /clipt record -g "$g" --audio=system --audio-balance=duck -o /tmp/snd-nomic.mp4 2>/tmp/snd.err & rp=$!
   sleep 1.5; /clipt record --stop; wait $rp
   check "duck without a microphone says so and records as usual" 'grep -q "audio balance: no microphone to duck under" /tmp/snd.err && [ -s /tmp/snd-nomic.mp4 ]'

@@ -14,6 +14,7 @@
 
 pub mod audio;
 mod camera;
+mod clarity;
 mod encode;
 mod follow;
 mod indicator;
@@ -922,8 +923,11 @@ fn write_loop(
             None => e.write(&f.data, end)?,
         }
     }
-    e.finish()?;
+    let clarity = e.finish()?;
     if let Some(r) = stop_reason {
+        eprintln!("clipt: {r}");
+    }
+    if let Some(r) = &clarity {
         eprintln!("clipt: {r}");
     }
     let secs = end as f64 / 1000.0;
@@ -935,7 +939,8 @@ fn write_loop(
             eprintln!("clipt: {chunks} sound chunks sent from {sources} source(s) ({:.1} s each)", chunks as f64 * 0.02 / sources as f64);
         }
     }
-    Ok((format!("{secs:.0} s, {}{}", codec.name(), if sources > 0 { ", AAC" } else { "" }), Duration::from_millis(end)))
+    let clarity = clarity.map(|r| format!(", {}", r.summary())).unwrap_or_default();
+    Ok((format!("{secs:.0} s, {}{}{clarity}", codec.name(), if sources > 0 { ", AAC" } else { "" }), Duration::from_millis(end)))
 }
 
 /// The pauses so far, in order; the last may still be running.
