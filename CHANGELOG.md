@@ -11,7 +11,9 @@ All notable changes are listed here. The format follows
   with the video, kept in sync and left out while paused. Off unless asked
   for (`--audio`, or `record_audio = "system"`); `--no-audio` overrides the
   setting. Needs a PulseAudio or pipewire-pulse server: libpulse-simple is
-  loaded only when recording sound, so clipt still starts without it.
+  loaded only when recording sound, so clipt still starts without it. On
+  plain PulseAudio (not PipeWire) the first second or so of sound is
+  silent: PulseAudio is slow to deliver the first chunk.
 - Several sound sources at once, each with its own volume:
   `--audio=system:70,mic:120`, `--audio=mic`, `--audio=both`, or devices
   by name. They're mixed into one track; `--separate-audio` (or
@@ -23,6 +25,9 @@ All notable changes are listed here. The format follows
   on or off for that recording; the tray menu has a *Record sound*
   checkbox.
 - The Flatpak records sound too.
+
+### Changed
+- Window recordings that zoom scale each frame 25–30 % faster.
 
 ### Fixed
 - The man page and the shell completions were missing `--gif` and
