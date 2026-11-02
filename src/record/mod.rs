@@ -81,8 +81,10 @@ pub struct Options {
     pub backend: Option<Backend>,
     /// Save a GIF (also chosen by a `.gif` output name or `record_format`).
     pub gif: bool,
-    /// Sound to record alongside.
-    pub audio: Option<audio::Source>,
+    /// Sound to record alongside, mixed at each source's volume.
+    pub audio: Vec<audio::Source>,
+    /// Also keep each source as its own sound track.
+    pub separate_audio: bool,
 }
 
 /// Sound queued for the writer beyond this means ffmpeg has stalled.
@@ -290,10 +292,11 @@ pub fn pause(cmd: PauseCmd) -> Result<()> {
 struct Slot {
     /// The frame and when it was captured.
     frame: Option<(VideoFrame, Instant)>,
-    /// Sound chunks not yet handed to the writer, oldest first.
-    audio: std::collections::VecDeque<audio::Chunk>,
-    /// The sound thread has read everything up to the stop.
-    audio_done: bool,
+    /// Sound chunks not yet handed to the writer, with their source's index,
+    /// oldest first per source.
+    audio: std::collections::VecDeque<(usize, audio::Chunk)>,
+    /// How many sound threads have read everything up to the stop.
+    audio_done: usize,
     error: Option<String>,
     done: bool,
 }
@@ -370,21 +373,23 @@ pub fn run(cfg: &Config, opts: Options) -> Result<()> {
     if let Some(d) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
     }
-    let audio = match opts.audio {
-        Some(_) if gif => {
-            eprintln!("clipt: GIFs have no sound; recording without it");
-            None
-        }
-        a => a,
+    let audio = if gif && !opts.audio.is_empty() {
+        eprintln!("clipt: GIFs have no sound; recording without it");
+        Vec::new()
+    } else {
+        opts.audio
     };
-    // Opened before recording starts, so a missing sound server stops it here.
-    let capture = match audio {
-        Some(src) => {
-            encode::check_aac()?;
-            Some(audio::open(src)?)
-        }
-        None => None,
-    };
+    // Opened before recording starts, so a missing sound server or device
+    // stops it here.
+    if !audio.is_empty() {
+        encode::check_aac()?;
+    }
+    let captures = audio.iter().map(audio::open).collect::<Result<Vec<_>>>()?;
+    let sound = (!audio.is_empty()).then(|| encode::Sound {
+        volumes: audio.iter().map(|a| a.volume).collect(),
+        labels: audio.iter().map(audio::Source::label).collect(),
+        separate: opts.separate_audio,
+    });
 
     let lock = Lock::take()?;
     unsafe {
@@ -441,13 +446,14 @@ pub fn run(cfg: &Config, opts: Options) -> Result<()> {
         });
     }
 
-    if let Some(cap) = capture {
+    let sources = captures.len();
+    for (i, cap) in captures.into_iter().enumerate() {
         let slot = slot.clone();
         std::thread::spawn(move || {
             let r = cap.run(|c| {
                 let (m, cv) = &*slot;
                 let mut s = m.lock().unwrap();
-                if s.audio.len() >= MAX_QUEUED_AUDIO {
+                if s.audio.len() >= MAX_QUEUED_AUDIO * sources {
                     s.error = Some("ffmpeg isn't keeping up with the sound".into());
                     cv.notify_one();
                     return false;
@@ -458,13 +464,13 @@ pub fn run(cfg: &Config, opts: Options) -> Result<()> {
                     let stopped = instant_at(STOPPED_AT.load(Ordering::SeqCst));
                     c.at < stopped && Instant::now() < stopped + Duration::from_secs(1)
                 };
-                s.audio.push_back(c);
+                s.audio.push_back((i, c));
                 cv.notify_one();
                 more
             });
             let (m, cv) = &*slot;
             let mut s = m.lock().unwrap();
-            s.audio_done = true;
+            s.audio_done += 1;
             if let Err(e) = r {
                 s.error = Some(format!("{e:#}"));
             }
@@ -472,7 +478,7 @@ pub fn run(cfg: &Config, opts: Options) -> Result<()> {
         });
     }
 
-    let mut result = write_loop(cfg, &lock, &slot, &codec, fps, zoom, audio.is_some(), &path, &captured);
+    let mut result = write_loop(cfg, &lock, &slot, &codec, fps, zoom, sound.as_ref(), &path, &captured);
     if gif && result.is_ok() {
         result = encode::to_gif(&path, &target, fps.min(15)).map(|()| {
             let _ = std::fs::remove_file(&path);
@@ -712,7 +718,7 @@ fn write_loop(
     codec: &encode::Codec,
     fps: u32,
     zoom: bool,
-    audio: bool,
+    sound: Option<&encode::Sound>,
     path: &Path,
     captured: &std::sync::atomic::AtomicU64,
 ) -> Result<String> {
@@ -730,8 +736,12 @@ fn write_loop(
     // Every pause, (from, to); sound is placed against these exactly.
     let mut pauses = Pauses::default();
     // Sound waiting for ffmpeg to start (at the first frame).
-    let mut pending: std::collections::VecDeque<audio::Chunk> = Default::default();
-    let mut last_audio_ts: Option<u64> = None;
+    let mut pending: std::collections::VecDeque<(usize, audio::Chunk)> = Default::default();
+    let sources = sound.map_or(0, |s| s.volumes.len());
+    // Each source's last timestamp.
+    let mut last_audio_ts: Vec<Option<u64>> = vec![None; sources];
+    // Which sources have delivered anything yet.
+    let mut heard = vec![false; sources];
     let mut chunks = 0u64;
     let mut last: Option<VideoFrame> = None;
     // `last` arrived after the most recent write and still needs sending,
@@ -800,6 +810,9 @@ fn write_loop(
             if s.frame.is_none() && s.audio.is_empty() && !s.done && !wait.is_zero() {
                 s = cv.wait_timeout(s, wait).unwrap().0;
             }
+            for (i, _) in &s.audio {
+                heard[*i] = true;
+            }
             pending.extend(s.audio.drain(..));
             if let Some(e) = s.error.take() {
                 drop(s);
@@ -826,6 +839,15 @@ fn write_loop(
                 last_at = if paused { Instant::now() } else { at.max(last_at) };
                 fresh = true;
             }
+        }
+        if started.elapsed() > Duration::from_secs(5)
+            && let Some(i) = heard.iter().position(|h| !h)
+        {
+            let label = sound.map(|s| s.labels[i].clone()).unwrap_or_default();
+            if let Some(e) = enc.take() {
+                let _ = e.finish();
+            }
+            bail!("no sound from {label} after 5 s");
         }
         if let (Some(e), Some(t0)) = (&mut enc, t0) {
             chunks += send_audio(e, &mut pending, t0, &pauses, None, &mut last_audio_ts)?;
@@ -855,7 +877,7 @@ fn write_loop(
             Some(e) => e,
             None => {
                 t0 = Some(at);
-                enc.insert(encode::Encoder::spawn(codec, out.width, out.height, out.order, fps, audio, path)?)
+                enc.insert(encode::Encoder::spawn(codec, out.width, out.height, out.order, fps, sound, path)?)
             }
         };
         let ts = stamp(at, t0.unwrap(), paused_total, &mut last_ts);
@@ -875,9 +897,9 @@ fn write_loop(
         paused_total += stopped.saturating_duration_since(since);
     }
     // The sound heard up to the stop, once the sound thread has read it.
-    if audio {
+    if sources > 0 {
         let s = m.lock().unwrap();
-        let (mut s, _) = cv.wait_timeout_while(s, Duration::from_secs(2), |s| !s.audio_done).unwrap();
+        let (mut s, _) = cv.wait_timeout_while(s, Duration::from_secs(2), |s| s.audio_done < sources).unwrap();
         pending.extend(s.audio.drain(..));
     }
     chunks += send_audio(&mut e, &mut pending, t0, &pauses, Some(stopped), &mut last_audio_ts)?;
@@ -902,11 +924,11 @@ fn write_loop(
         let c = captured.load(Ordering::Relaxed);
         let wall = started.elapsed().as_secs_f64();
         eprintln!("clipt: recorded {secs:.1} s of {wall:.1} s: {c} frames captured ({:.1}/s), {written} sent to ffmpeg", c as f64 / wall);
-        if audio {
-            eprintln!("clipt: {chunks} sound chunks sent ({:.1} s)", chunks as f64 * 0.02);
+        if sources > 0 {
+            eprintln!("clipt: {chunks} sound chunks sent from {sources} source(s) ({:.1} s each)", chunks as f64 * 0.02 / sources as f64);
         }
     }
-    Ok(format!("{secs:.0} s, {}{}", codec.name(), if audio { ", AAC" } else { "" }))
+    Ok(format!("{secs:.0} s, {}{}", codec.name(), if sources > 0 { ", AAC" } else { "" }))
 }
 
 /// The pauses so far, in order; the last may still be running.
@@ -940,22 +962,22 @@ impl Pauses {
 /// Returns how many chunks were sent.
 fn send_audio(
     e: &mut encode::Encoder,
-    pending: &mut std::collections::VecDeque<audio::Chunk>,
+    pending: &mut std::collections::VecDeque<(usize, audio::Chunk)>,
     t0: Instant,
     pauses: &Pauses,
     until: Option<Instant>,
-    last_ts: &mut Option<u64>,
+    last_ts: &mut [Option<u64>],
 ) -> Result<u64> {
     let mut sent = 0;
-    while let Some(c) = pending.pop_front() {
+    while let Some((i, c)) = pending.pop_front() {
         if c.at < t0 || until.is_some_and(|u| c.at >= u) || pauses.contains(c.at) {
             continue;
         }
         let ms = audio_ms(c.at, t0, pauses);
         // Strictly increasing; the resampler absorbs the overlap.
-        let ms = last_ts.map_or(ms, |prev| ms.max(prev + 1));
-        *last_ts = Some(ms);
-        e.write_audio(&c.data, ms)?;
+        let ms = last_ts[i].map_or(ms, |prev| ms.max(prev + 1));
+        last_ts[i] = Some(ms);
+        e.write_audio(i, &c.data, ms)?;
         sent += 1;
     }
     Ok(sent)

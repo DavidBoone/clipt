@@ -12,6 +12,12 @@ All notable changes are listed here. The format follows
   for (`--audio`, or `record_audio = "system"`); `--no-audio` overrides the
   setting. Needs a PulseAudio or pipewire-pulse server: libpulse-simple is
   loaded only when recording sound, so clipt still starts without it.
+- Several sound sources at once, each with its own volume:
+  `--audio=system:70,mic:120`, `--audio=mic`, `--audio=both`, or devices
+  by name. They're mixed into one track; `--separate-audio` (or
+  `record_separate_audio`) also keeps each source as its own track, at the
+  volume it was recorded, to rebalance later. `clipt list sound` lists the
+  devices and marks what `system` and `mic` stand for.
 
 ### Fixed
 - The man page and the shell completions were missing `--gif` and

@@ -1,6 +1,7 @@
 # Audio in recordings: implementation plan
 
-Status: phases 0 and 1 done (system sound), 2026-11-01.
+Status: phases 0–2 done (system sound; microphone, several sources, volumes,
+separate tracks, devices), 2026-11-01. Phase 3 (controls, Flatpak) next.
 
 ## Goal
 
@@ -17,8 +18,10 @@ for, so nobody's microphone is recorded by surprise.
 | Not ffmpeg's own audio input (`-f pulse`) | Rejected | ffmpeg would stamp audio with its own clock, and keep recording through a pause. clipt's video timestamps are its own (see the recording plan's writer), so audio has to be too |
 | Not native PipeWire audio | Rejected for now | clipt's PipeWire code handles video formats only, and the Flatpak can't reach PipeWire for audio without a permission Flathub discourages (`xdg-run/pipewire-0`); it gets audio through the PulseAudio socket. Revisit only if pipewire-pulse turns out to be missing somewhere that matters |
 | Getting audio to ffmpeg | Extra tracks in the Matroska stream clipt already writes (`A_PCM/INT/LIT`, 16-bit, 48 kHz, stereo) | Audio and video timestamps come from one clock, in one stream, so pause and sync are handled in one place |
-| Sources | `system` (the default output's monitor, `@DEFAULT_MONITOR@`), `mic` (`@DEFAULT_SOURCE@`), or `both` | Covers tutorials (`both`), demos (`system`) and narration (`mic`). Picking a specific device can come later |
-| Both at once | Two audio tracks, mixed by ffmpeg (`amix`) | Each source keeps its own clock and latency; mixing in clipt would mean resampling one to match the other |
+| Sources | Up to 8: `system` (the default output's monitor, `@DEFAULT_MONITOR@`), `mic` (`@DEFAULT_SOURCE@`), or devices by name; `both` means `system,mic` | Covers tutorials (`both`), demos (`system`) and narration (`mic`); names cover a second microphone or another output. Added in phase 2 on request, with `clipt list sound` to find the names |
+| Several at once | One audio track per source, each through its own `volume`, mixed by ffmpeg (`amix`, `normalize=0`) | Each source keeps its own clock and latency; mixing in clipt would mean resampling one to match the other. `normalize=0` keeps the volumes asked for, rather than dividing by the number of sources |
+| Balance | A volume per source, 0–400 %, set before recording (`system:70,mic:120`); optionally each source also kept as its own track at its recorded level (`--separate-audio`), after the mix | Fixed volumes give one track that plays right everywhere; separate tracks let the balance be fixed afterwards in an editor. Changing volumes during a recording is left for later (see *Not in this plan*) |
+| Listing devices | libpulse's asynchronous API, loaded like libpulse-simple, reading only the first fields of `pa_server_info` and `pa_source_info` | libpulse-simple can't list anything; the first fields of those records haven't changed in libpulse's history, and a unit test pins their offsets |
 | Encoding | AAC (ffmpeg's built-in `aac`), 160 kb/s, in every container | MP4 and MOV need it, MKV takes it, and it plays everywhere. Opus is better per bit but not in MOV, and is awkward in MP4 for some players |
 | GIF | No audio | GIF can't hold sound; `--audio` with `--gif` says so and records without it |
 | Default | Off | Recording the microphone without being asked would be a privacy failure |
@@ -94,17 +97,29 @@ construction. What can still go wrong, and the answer to each:
 
 ## User interface
 
-- `clipt record --audio[=system|mic|both]`; a bare `--audio` means
-  `system`. `--no-audio` overrides the setting for one recording.
-- Setting: `record_audio = "none"` (default), `"system"`, `"mic"` or
-  `"both"`.
+- `clipt record --audio[=SOURCES]`: `system`, `mic`, `both`, or a comma-
+  separated list of sources (`system`, `mic`, device names), each with an
+  optional `:PERCENT` volume. A bare `--audio` means `system`.
+  `--separate-audio` also keeps each source as its own track. `--no-audio`
+  overrides the setting for one recording.
+- Settings: `record_audio`, taking the same values (default `"none"`), and
+  `record_separate_audio` (default `false`).
+- `clipt list sound` lists the devices, marking what `system` and `mic`
+  stand for. (Not new lines in `clipt list`: the Flatpak probe script counts
+  its lines as outputs.)
+- Track names: "Mix", then "System sound", "Microphone" or the device name;
+  stored as the handler name in MP4 and MOV (what players show) and as the
+  title in MKV.
 - Overlay in record mode: a toggle in the toolbar (speaker, microphone, off)
   that starts from the setting. It changes only that recording, not the
   setting.
 - Tray: a *Record with sound* checkbox under the record entries.
 - Errors are clear and stop before recording starts: no libpulse-simple, no
-  sound server, or no microphone, each saying what to install or check.
-  The recording doesn't quietly go ahead without sound.
+  sound server, an unknown device (pointing at `clipt list sound`), or a
+  volume out of range, each saying what to install or check. The recording
+  doesn't quietly go ahead without sound. (A missing microphone can't be
+  told apart: the server always has a default input, falling back to a
+  monitor or a dummy device.)
 - The man page, completions, README Usage and CHANGELOG get the new
   options.
 
@@ -124,9 +139,12 @@ construction. What can still go wrong, and the answer to each:
   with a null sink in the container. Play a 1 kHz tone, record, and check
   the result with `ffprobe` and `astats`: there is an AAC track, the tone is
   in it, and its duration matches the video. Pause test: the tone plays only
-  while paused, and the file must be silent there. Sync test: the test window
-  flashes white and a beep plays at the same moment, and the beep's onset
-  must land within 40 ms (about one frame) of the flash.
+  while paused, and the file must be silent there. Several sources: a second
+  null sink stands in for the microphone with a 440 Hz tone, so each track
+  can be checked by frequency. (The planned beep-and-flash sync test was
+  dropped: the test's own playback latency, ffmpeg's PulseAudio output and
+  PulseAudio's slow start, is unknown, so it would mostly measure itself.
+  The spike measured stamping against a known reference instead.)
 - Flatpak: the same tone test through `clipt-launch` against headless
   Sway, as done for video.
 - By hand: 30 minutes with a video playing on Plasma, then the sync
@@ -149,11 +167,22 @@ with pipewire-pulse: a tone is recorded at the right level, sound and video
 last as long, a tone played only while paused is left out, `--gif` with
 `--audio` warns, and a missing server stops the recording before it starts.
 
-**2. Microphone and both.** `mic` and `both`, the `amix` path, the e2e sync
-test, the microphone-missing error.
+**2. Several sources (done 2026-11-01).** Widened on request from "`mic`
+and `both`" to: any number of sources up to 8, a volume for each,
+`--separate-audio`, devices by name and `clipt list sound`. e2e tests on
+all three desktops: the listing, three tracks with the right names, each
+separate track holding only its own tone (31 dB apart), the mix holding
+both equally, `system:100,mic:25` putting the microphone 12 dB under,
+a device by name, and the unknown-device and volume errors. Found on the
+way: pipewire-pulse, unlike PulseAudio, accepts a stream from a device that
+doesn't exist, and the recording ran on with nothing from it, so named
+devices are now checked against the server's list before recording, and a
+source that has delivered nothing after 5 s stops the recording.
 
 **3. Controls and packaging.** Overlay toggle, tray checkbox, Flatpak
-permission and ffmpeg components, man page, completions, README, CHANGELOG.
+permission and ffmpeg components (now also `asplit`, `amix` and `volume`).
+The man page, completions, README and CHANGELOG already cover phases 1
+and 2.
 
 ## Spike results (2026-11-01)
 
@@ -222,6 +251,8 @@ drift more.
 
 ## Not in this plan
 
-Choosing devices other than the defaults, per-source volume, noise
-suppression, recording one application's sound only (PipeWire can, through
-the portal, but not through the PulseAudio API), and webcam overlay.
+Changing volumes during a recording (it would mean applying them in clipt
+before ffmpeg, with a command such as `clipt record --volume mic=+10%`;
+worth it once the overlay or tray has controls for it), noise suppression,
+recording one application's sound only (PipeWire can, through the portal,
+but not through the PulseAudio API), and webcam overlay.

@@ -36,8 +36,11 @@ pub struct Config {
     pub record_codec: String,
     /// mp4 or gif (converted when the recording stops, at most 15 fps).
     pub record_format: String,
-    /// Sound to record: none or system.
+    /// Sound to record: none, system, mic, both, or a list of sources with
+    /// volumes, as `--audio` takes it.
     pub record_audio: String,
+    /// Also keep each sound source as its own track.
+    pub record_separate_audio: bool,
     /// A recording stops by itself after this many seconds (0 = no limit).
     pub max_duration: u64,
 }
@@ -61,6 +64,7 @@ impl Default for Config {
             record_codec: "auto".into(),
             record_format: "mp4".into(),
             record_audio: "none".into(),
+            record_separate_audio: false,
             max_duration: 3600,
         }
     }
