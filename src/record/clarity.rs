@@ -157,9 +157,26 @@ struct Frame {
 }
 
 impl Frame {
-    fn sii(&self) -> f32 {
-        (0..6).map(|i| WEIGHTS[i] * ((self.voice_bands[i] - self.rest_bands[i] + 15.0) / 30.0).clamp(0.0, 1.0)).sum()
+    /// With the rest `down` dB quieter than it was.
+    fn sii(&self, down: f32) -> f32 {
+        (0..6).map(|i| WEIGHTS[i] * ((self.voice_bands[i] - self.rest_bands[i] + down + 15.0) / 30.0).clamp(0.0, 1.0)).sum()
     }
+}
+
+/// The 10th-percentile SII of `speech` with the rest `down` dB quieter.
+fn clarity_at(speech: &[&Frame], down: f32) -> f32 {
+    let mut sii: Vec<f32> = speech.iter().map(|f| f.sii(down)).collect();
+    sii.sort_by(f32::total_cmp);
+    sii[sii.len() / 10]
+}
+
+/// How much quieter the rest must be for the target, to the half decibel:
+/// ducking dips the other sources by an amount set by the voice alone, so
+/// turning them down by some dB lowers them by exactly that in the mix, and
+/// the frames already measured say what the clarity would be. `None` if it
+/// already meets the target; 30 dB at most.
+fn needed(speech: &[&Frame]) -> Option<f32> {
+    (0..=60).map(|h| h as f32 / 2.0).find(|&down| clarity_at(speech, down) >= TARGET).or(Some(30.0)).filter(|&d| d > 0.0)
 }
 
 /// One 1 s leakage window: the voice's and the rest's level, and the
@@ -255,12 +272,13 @@ impl Analyzer {
         if speech.len() < 10 {
             return Some(Report::TooLittleSpeech);
         }
-        let mut sii: Vec<f32> = speech.iter().map(|f| f.sii()).collect();
+        let mut sii: Vec<f32> = speech.iter().map(|f| f.sii(0.0)).collect();
         sii.sort_by(f32::total_cmp);
         let mut gaps: Vec<f32> = speech.iter().map(|f| f.voice - f.rest).collect();
         gaps.sort_by(f32::total_cmp);
         let clarity = sii[sii.len() / 10];
         let gap = gaps[gaps.len() / 2];
+        let quieter = needed(&speech);
 
         let mut with_rest: Vec<&Window> = self.windows.iter().filter(|w| w.rest > REST_FLOOR_DB).collect();
         with_rest.sort_by(|a, b| a.voice.total_cmp(&b.voice));
@@ -286,7 +304,7 @@ impl Analyzer {
                 with_rest.len()
             );
         }
-        Some(Report::Measured { clarity, gap, leak })
+        Some(Report::Measured { clarity, gap, leak, quieter })
     }
 }
 
@@ -348,11 +366,13 @@ pub enum Leak {
 pub enum Report {
     TooLittleSpeech,
     /// `clarity`: the 10th-percentile SII; `gap`: the median dB the voice is
-    /// over the rest while speaking.
+    /// over the rest while speaking; `quieter`: how many dB quieter the rest
+    /// would need to be for a good clarity, when it isn't.
     Measured {
         clarity: f32,
         gap: f32,
         leak: Leak,
+        quieter: Option<f32>,
     },
 }
 
@@ -378,7 +398,7 @@ impl fmt::Display for Report {
                  the voice is {gap:.0} dB over the rest (15 dB is enough, 20 with singing or talking under it). \
                  Headphones give a reliable result"
             ),
-            Report::Measured { clarity, leak, .. } => {
+            Report::Measured { clarity, leak, quieter, .. } => {
                 let verdict = if clarity >= GOOD {
                     "very good"
                 } else if clarity >= TARGET {
@@ -389,6 +409,11 @@ impl fmt::Display for Report {
                     "poor: the other sound covers much of the voice"
                 };
                 write!(f, "speech clarity {clarity:.2}, {verdict}")?;
+                match quieter {
+                    Some(d) if d >= 30.0 => write!(f, "; even 30 dB quieter wouldn't make it good")?,
+                    Some(d) => write!(f, "; the other sound about {d:.0} dB quieter would make it good")?,
+                    None => {}
+                }
                 if leak == Leak::Unchecked {
                     write!(f, " (too few pauses to check the microphone doesn't hear the speakers)")?;
                 }
@@ -464,6 +489,18 @@ mod tests {
             let c = clarity(run(12, gap, None));
             assert!((c - expect).abs() < 0.05, "gap {gap} dB: clarity {c:.2}, expected about {expect}");
         }
+    }
+
+    /// At 5 dB the frames are at 3.2 dB SNR, SII 0.61; 0.75 needs 7.5 dB,
+    /// so the rest 4.5 dB quieter (to the half decibel).
+    #[test]
+    fn says_how_much_quieter() {
+        let r = run(12, 5.0, None);
+        let Report::Measured { quieter: Some(d), .. } = r else { panic!("{r:?}") };
+        assert!((d - 4.5).abs() <= 0.5, "{d} dB");
+        assert!(r.to_string().contains(&format!("about {d:.0} dB quieter")), "{r}");
+        assert!(matches!(run(12, 30.0, None), Report::Measured { quieter: None, .. }));
+        assert!(matches!(run(12, -40.0, None), Report::Measured { quieter: Some(30.0), .. }));
     }
 
     #[test]

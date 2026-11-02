@@ -238,7 +238,13 @@ Done so far:
   0.12 high; the leak check counts windows whose other sound is above
   −60 dBFS (quiet music is about −55 once ducked). On the readings a leak
   20, 30 or 40 dB under the voice peaks at 0.83–0.90, a clean one at 0.13.
-  Under 0.5 % of a core. The at-stop re-mix is next.
+  Under 0.5 % of a core. Below 0.75 it also says how much quieter the
+  other sound should be, computed from the frames already measured:
+  ducking's dip is set by the voice alone, so turning the other sources
+  down lowers them by exactly that in the mix. From the 10 dB recording it
+  predicts 6 dB (so 16 dB); remade at 15.5 dB it measures 0.748 and
+  predicts the same 16. So the at-stop re-mix, next, needs no search: one
+  pass at the computed volume.
 
 ## Smart balance (phase 4)
 
