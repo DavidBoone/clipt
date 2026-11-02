@@ -3,9 +3,11 @@
 //!
 //! Wayland has no protocol for this, so each compositor is asked in its own
 //! way: KWin through a throwaway script, Sway and Hyprland over their IPC
-//! sockets, and X11 through the EWMH window list. Anything else (GNOME, which
-//! doesn't expose window positions to clients) returns an empty list and the
-//! overlay falls back to highlighting whole monitors.
+//! sockets, X11 through the EWMH window list, and GNOME (which doesn't tell
+//! applications where windows are) through clipt's optional GNOME Shell
+//! extension (data/gnome-extension). Anything else, or GNOME without the
+//! extension, returns an empty list and the overlay falls back to
+//! highlighting whole monitors.
 //!
 //! Positions are in the same logical desktop coordinates as the outputs. The
 //! list is topmost first.
@@ -48,6 +50,8 @@ pub fn list(x11: bool) -> Vec<Window> {
         hyprland()
     } else if is_kwin() {
         kwin()
+    } else if is_gnome() {
+        gnome()
     } else {
         Ok(Vec::new())
     };
@@ -65,7 +69,84 @@ pub fn list(x11: bool) -> Vec<Window> {
 }
 
 fn is_kwin() -> bool {
-    std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.split(':').any(|d| d.eq_ignore_ascii_case("KDE")))
+    desktop_is("KDE")
+}
+
+fn is_gnome() -> bool {
+    desktop_is("GNOME")
+}
+
+/// Whether `XDG_CURRENT_DESKTOP` (a list such as `ubuntu:GNOME`) names `name`.
+fn desktop_is(name: &str) -> bool {
+    std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.split(':').any(|d| d.eq_ignore_ascii_case(name)))
+}
+
+// ---- GNOME ----------------------------------------------------------------
+
+const EXTENSION_UUID: &str = "clipt-windows@jasondyck.github.io";
+const EXTENSION_NAME: &str = "io.github.jasondyck.clipt.Windows";
+
+/// What the extension sends for a window: x, y, width, height, WM class,
+/// title, window id. The list is topmost first.
+type GnomeWindow = (i32, i32, i32, i32, String, String, String);
+
+/// Ask clipt's GNOME Shell extension, if it's installed and enabled.
+/// Without it, no windows: GNOME has no other way to tell.
+fn gnome() -> Result<Vec<Window>> {
+    let conn = crate::dbus::session().context("connecting to the session bus")?;
+    if !crate::dbus::name_has_owner(&conn, EXTENSION_NAME) {
+        if std::env::var_os("CLIPT_DEBUG").is_some() {
+            eprintln!("clipt: no window list on GNOME without the clipt-windows extension (clipt gnome-extension)");
+        }
+        return Ok(Vec::new());
+    }
+    let list = crate::dbus::Proxy::new(&conn, EXTENSION_NAME, "/io/github/jasondyck/clipt/Windows", EXTENSION_NAME)?;
+    let (wins,): (Vec<GnomeWindow>,) = list.call("List", &()).context("asking the clipt-windows extension")?;
+    // Mutter's frame rectangles are in its layout coordinates, which are the
+    // ones clipt's monitors come in (Mutter reports them through xdg-output
+    // from the same layout), in its logical layout mode and the physical one
+    // alike, so they're used as they are.
+    Ok(wins
+        .into_iter()
+        .map(|(x, y, w, h, app, title, id)| Window { x: x as f32, y: y as f32, width: w as f32, height: h as f32, app, title, id })
+        .collect())
+}
+
+/// `clipt gnome-extension`: install the extension for this user and enable
+/// it. GNOME Shell on Wayland only finds a newly installed extension at the
+/// next login, so enabling may have to wait until then.
+pub fn install_gnome_extension() -> Result<()> {
+    // The sandbox's data folder is its own, where GNOME Shell never looks.
+    if std::env::var_os("FLATPAK_ID").is_some() {
+        anyhow::bail!(
+            "the Flatpak can't install it where GNOME looks; copy data/gnome-extension/{EXTENSION_UUID} from clipt's source \
+             into ~/.local/share/gnome-shell/extensions/, log out and back in, and run: gnome-extensions enable {EXTENSION_UUID}"
+        );
+    }
+    const FILES: [(&str, &str); 2] = [
+        ("metadata.json", include_str!("../data/gnome-extension/clipt-windows@jasondyck.github.io/metadata.json")),
+        ("extension.js", include_str!("../data/gnome-extension/clipt-windows@jasondyck.github.io/extension.js")),
+    ];
+    let base =
+        std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from).unwrap_or_else(|| crate::config::home().join(".local/share"));
+    let dir = base.join("gnome-shell/extensions").join(EXTENSION_UUID);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    for (name, text) in FILES {
+        std::fs::write(dir.join(name), text).with_context(|| format!("writing {}", dir.join(name).display()))?;
+    }
+    println!("Installed {}", dir.display());
+    let enabled = std::process::Command::new("gnome-extensions")
+        .args(["enable", EXTENSION_UUID])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if enabled {
+        println!("Enabled. If windows don't highlight yet, log out and back in.");
+    } else {
+        println!("Log out and back in, then run: gnome-extensions enable {EXTENSION_UUID}");
+    }
+    println!("To remove it: gnome-extensions uninstall {EXTENSION_UUID}");
+    Ok(())
 }
 
 // ---- KWin -----------------------------------------------------------------

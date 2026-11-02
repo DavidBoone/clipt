@@ -34,6 +34,8 @@ finish-args:
   - --talk-name=org.kde.KWin.ScreenShot2
   # Hyprland's IPC socket, for window positions.
   - --filesystem=xdg-run/hypr
+  # GNOME: clipt's optional GNOME Shell extension, for window positions.
+  - --talk-name=io.github.jasondyck.clipt.Windows
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
   env:

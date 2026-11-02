@@ -1,0 +1,7 @@
+{
+  "uuid": "clipt-windows@jasondyck.github.io",
+  "name": "clipt window list",
+  "description": "Tells clipt where windows are, so its screenshot overlay can highlight and select a window under the pointer. GNOME doesn't give that to applications; this answers only clipt.",
+  "shell-version": ["45", "46", "47", "48", "49", "50", "51"],
+  "url": "https://github.com/jasondyck/clipt"
+}
