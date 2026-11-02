@@ -118,6 +118,10 @@ for squares and 45° lines. **Enter**/**Ctrl+C**/double-click copies, **Ctrl+S**
 saves, **Ctrl+Z**/**Ctrl+Shift+Z** undo/redo, **Esc** cancels, right-click
 backs out a step.
 
+To record a video instead, click **Video** at the bottom of the screen (or
+press **Ctrl+R**), select, toggle sound with **S** and the microphone with
+**M**, and press **Enter**; stop it from the tray or with `clipt record --stop`.
+
 `clipt tray` puts an icon in the system tray (StatusNotifierItem: KDE, waybar,
 GNOME with the AppIndicator extension, Xfce, …). Left-click captures a region,
 middle-click copies the whole desktop, and the right-click menu adds a 3-second

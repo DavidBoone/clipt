@@ -21,6 +21,10 @@ pub enum Button {
     SystemSound,
     /// Record mode: toggle the microphone.
     Mic,
+    /// Screenshot mode: switch to recording the selection instead.
+    RecordMode,
+    /// Record mode, from the screenshot overlay: back to a screenshot.
+    ShotMode,
 }
 
 impl Button {
@@ -35,6 +39,8 @@ impl Button {
             Button::Record => 6,
             Button::SystemSound => 7,
             Button::Mic => 8,
+            Button::RecordMode => 9,
+            Button::ShotMode => 10,
         }
     }
 }
@@ -73,14 +79,12 @@ enum Item {
 
 fn items(ed: &Editor) -> Vec<Item> {
     if ed.record {
-        return vec![
-            Item::Btn(Button::Record),
-            Item::Sep,
-            Item::Btn(Button::SystemSound),
-            Item::Btn(Button::Mic),
-            Item::Sep,
-            Item::Btn(Button::Close),
-        ];
+        let mut v = vec![Item::Btn(Button::Record), Item::Sep, Item::Btn(Button::SystemSound), Item::Btn(Button::Mic), Item::Sep];
+        if ed.can_switch {
+            v.push(Item::Btn(Button::ShotMode));
+        }
+        v.push(Item::Btn(Button::Close));
+        return v;
     }
     let mut v = vec![Item::Btn(Button::Tool(Tool::Select))];
     v.extend(Tool::DRAWING.iter().map(|&t| Item::Btn(Button::Tool(t))));
@@ -88,6 +92,9 @@ fn items(ed: &Editor) -> Vec<Item> {
     v.extend((0..PALETTE.len()).map(|i| Item::Btn(Button::Color(i))));
     v.push(Item::Sep);
     v.extend([Item::Btn(Button::Undo), Item::Btn(Button::Redo), Item::Sep]);
+    if ed.can_switch {
+        v.push(Item::Btn(Button::RecordMode));
+    }
     v.extend([Item::Btn(Button::Save), Item::Btn(Button::Copy), Item::Btn(Button::Close)]);
     v
 }
@@ -242,6 +249,11 @@ pub fn dynamic_layers(ed: &Editor, frame: u64) -> Vec<Layer> {
     };
     layers.push(Layer { key: hint as u64 + 2 * !ed.windows.is_empty() as u64 + 4 * ed.record as u64, rects: grow(rects) });
 
+    // Screenshot | Video switch
+    let rects: Vec<Option<Rect>> =
+        ed.screens.iter().filter_map(|s| mode_switch_layout(ed, s.bounds())).map(|(panel, _)| inflate(panel, CARD_SHADOW)).collect();
+    layers.push(Layer { key: !rects.is_empty() as u64 + 2 * ed.record as u64, rects: grow(rects) });
+
     // toolbar + tooltip
     let tb = toolbar_layout(ed).map(|(panel, _)| panel);
     let hover = toolbar_hit(ed, p).filter(|_| ed.pointer_in);
@@ -318,7 +330,8 @@ pub fn render(ed: &Editor, idx: usize, pm: &mut PixmapMut, origin: (i32, i32)) {
         }
     }
 
-    for shape in ed.shapes.iter().chain(ed.in_progress()) {
+    // Record mode records the live screen, so annotations aren't shown.
+    for shape in ed.shapes.iter().chain(ed.in_progress()).filter(|_| !ed.record) {
         shape.draw(pm, &view, Some((scr.bg.as_ref(), origin)), &ed.fonts);
     }
     if let Some(te) = &ed.text {
@@ -349,6 +362,7 @@ pub fn render(ed: &Editor, idx: usize, pm: &mut PixmapMut, origin: (i32, i32)) {
     if ed.sel.is_none() && !ed.is_adjusting() {
         draw_hint(ed, pm, &view, bounds);
     }
+    draw_mode_switch(ed, pm, &view, bounds);
 
     if let Some((panel, btns)) = toolbar_layout(ed)
         && panel.intersect(&bounds).is_some()
@@ -498,6 +512,56 @@ fn draw_hover(ed: &Editor, pm: &mut PixmapMut, view: &View, h: &super::Hover) {
     let mid = c.left() + c.width() / 2.0;
     label(ed, pm, view, (mid - tw / 2.0, c.top() + 11.0), CARD_TITLE, &title, Color::WHITE, true);
     label(ed, pm, view, (mid - sw / 2.0, c.top() + 36.0), CARD_SUB, &sub, SECONDARY(), false);
+}
+
+const MODE_H: f32 = 40.0;
+const MODES: [(bool, &str); 2] = [(false, "Screenshot"), (true, "Video")];
+
+/// The Screenshot | Video switch at the bottom of screen `b`, for people who
+/// won't find Ctrl+R or the toolbar button: its panel, and each half with
+/// whether it's record mode. Only in the screenshot overlay, and not while
+/// dragging.
+pub fn mode_switch_layout(ed: &Editor, b: Rect) -> Option<(Rect, Vec<(Rect, bool)>)> {
+    if !ed.can_switch || ed.is_adjusting() {
+        return None;
+    }
+    let widths: Vec<f32> = MODES.iter().map(|(_, t)| 12.0 + 20.0 + 8.0 + text::measure(&ed.fonts.regular, HINT_FS, t) + 14.0).collect();
+    let w = 8.0 + widths.iter().sum::<f32>();
+    let panel = Rect::from_xywh(b.left() + (b.width() - w) / 2.0, b.bottom() - 24.0 - MODE_H, w, MODE_H)?;
+    let mut x = panel.left() + 4.0;
+    let mut halves = Vec::new();
+    for ((record, _), w) in MODES.iter().zip(widths) {
+        halves.push((Rect::from_xywh(x, panel.top() + 4.0, w, MODE_H - 8.0)?, *record));
+        x += w;
+    }
+    Some((panel, halves))
+}
+
+/// Which half of a mode switch `p` is on: Some(true) for Video. A click on
+/// the panel's edge counts as the current mode, so it doesn't start a drag.
+pub fn mode_switch_hit(ed: &Editor, p: Pt) -> Option<bool> {
+    let (panel, halves) = ed.screens.iter().filter_map(|s| mode_switch_layout(ed, s.bounds())).find(|(r, _)| r.contains(p.0, p.1))?;
+    let _ = panel;
+    Some(halves.iter().find(|(r, _)| r.contains(p.0, p.1)).map_or(ed.record, |(_, rec)| *rec))
+}
+
+fn draw_mode_switch(ed: &Editor, pm: &mut PixmapMut, view: &View, b: Rect) {
+    let Some((panel, halves)) = mode_switch_layout(ed, b) else { return };
+    let s = view.scale;
+    card(pm, view, panel, MODE_H / 2.0);
+    for ((r, record), (_, name)) in halves.into_iter().zip(MODES) {
+        let on = record == ed.record;
+        if on {
+            pm.fill_path(&rounded(view, r, (MODE_H - 8.0) / 2.0), &view.paint(ACCENT()), FillRule::Winding, Transform::identity(), None);
+        }
+        let fg = if on { Color::WHITE } else { MUTED() };
+        let button = if record { Button::RecordMode } else { Button::ShotMode };
+        if let Some(ir) = Rect::from_xywh(r.left() + 8.0, r.top(), 28.0, r.height()) {
+            icon(ed, pm, view, ir, button, fg);
+        }
+        let th = text::line_height(&ed.fonts.regular, HINT_FS * s) / s;
+        label(ed, pm, view, (r.left() + 12.0 + 20.0 + 8.0, r.top() + (r.height() - th) / 2.0), HINT_FS, name, fg, false);
+    }
 }
 
 /// (key cap, what it does) for the hint bar.
@@ -739,6 +803,8 @@ fn tooltip(ed: &Editor, b: Button) -> String {
         Button::Record => "Record  Enter".into(),
         Button::SystemSound => format!("Computer sound: {}  S", on(ed.sound.system)),
         Button::Mic => format!("Microphone: {}  M", on(ed.sound.mic)),
+        Button::RecordMode => "Record video  Ctrl+R".into(),
+        Button::ShotMode => "Screenshot instead  Ctrl+R".into(),
     }
 }
 
@@ -877,6 +943,20 @@ fn icon(ed: &Editor, pm: &mut PixmapMut, view: &View, r: Rect, b: Button, fg: Co
             line(&mut pb, &[(3.0, 9.5), (7.0, 9.5), (12.0, 5.0), (12.0, 19.0), (7.0, 14.5), (3.0, 14.5), (3.0, 9.5)]);
             line(&mut pb, &[(15.5, 9.0), (16.6, 12.0), (15.5, 15.0)]);
             line(&mut pb, &[(18.5, 6.5), (20.5, 12.0), (18.5, 17.5)]);
+        }
+        Button::RecordMode => {
+            // video camera: body and lens
+            line(&mut pb, &[(3.0, 7.0), (15.0, 7.0), (15.0, 17.0), (3.0, 17.0), (3.0, 7.0)]);
+            line(&mut pb, &[(15.0, 10.5), (21.0, 7.5), (21.0, 16.5), (15.0, 13.5)]);
+        }
+        Button::ShotMode => {
+            // stills camera: body with its top, and the lens
+            line(
+                &mut pb,
+                &[(3.0, 8.0), (8.0, 8.0), (9.5, 5.0), (14.5, 5.0), (16.0, 8.0), (21.0, 8.0), (21.0, 19.0), (3.0, 19.0), (3.0, 8.0)],
+            );
+            let c = g(12.0, 13.5);
+            pb.push_circle(c.0, c.1, 3.5 * k * s);
         }
         Button::Mic => {
             // capsule, holder and stand

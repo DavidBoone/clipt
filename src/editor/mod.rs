@@ -166,6 +166,9 @@ pub struct Editor {
     pub record: bool,
     /// Record mode: which sound to record with it, toggled in the toolbar.
     pub sound: SoundToggles,
+    /// The screenshot overlay may switch to record mode and back (Ctrl+R or
+    /// the toolbar). `clipt record`'s picker can't: it only records.
+    pub can_switch: bool,
     last_click: Option<(std::time::Instant, Pt)>,
     /// Show the size/width hint pill until the next pointer move.
     pub width_hint: bool,
@@ -212,6 +215,7 @@ impl Editor {
             outcome: None,
             record: false,
             sound: SoundToggles::default(),
+            can_switch: false,
             last_click: None,
             width_hint: false,
             revision: 0,
@@ -402,7 +406,7 @@ impl Editor {
 
     pub fn cursor(&self) -> CursorKind {
         let p = self.pointer;
-        if ui::toolbar_hit(self, p).is_some() {
+        if ui::toolbar_hit(self, p).is_some() || ui::mode_switch_hit(self, p).is_some() {
             return CursorKind::Pointer;
         }
         match &self.drag {
@@ -525,6 +529,13 @@ impl Editor {
             self.press_button(btn);
             return true;
         }
+        if let Some(record) = ui::mode_switch_hit(self, p) {
+            if record != self.record {
+                self.commit_text();
+                self.switch_mode();
+            }
+            return true;
+        }
 
         let now = std::time::Instant::now();
         let double =
@@ -645,6 +656,10 @@ impl Editor {
             return true;
         }
 
+        if mods.ctrl && matches!(key, Key::Char('r' | 'R')) && self.can_switch {
+            self.switch_mode();
+            return true;
+        }
         if self.record {
             return self.record_key(key, mods);
         }
@@ -702,6 +717,16 @@ impl Editor {
         true
     }
 
+    /// Between screenshot and record mode. Annotations stay, but aren't shown
+    /// in record mode: a recording is of the live screen, without them.
+    fn switch_mode(&mut self) {
+        self.record = !self.record;
+        self.text = None;
+        self.drag = Drag::None;
+        // The toolbar, hint and shapes all change.
+        self.revision += 1;
+    }
+
     /// What Enter, double-click and the main button do.
     fn accept(&self) -> Outcome {
         if self.record { Outcome::Record } else { Outcome::Copy }
@@ -738,6 +763,7 @@ impl Editor {
             ui::Button::Record => self.outcome = Some(Outcome::Record),
             ui::Button::SystemSound => self.sound.system = !self.sound.system,
             ui::Button::Mic => self.sound.mic = !self.sound.mic,
+            ui::Button::RecordMode | ui::Button::ShotMode => self.switch_mode(),
             ui::Button::Tool(t) => self.tool = t,
             ui::Button::Color(i) => self.color = i,
             ui::Button::Undo => self.undo(),
@@ -950,6 +976,57 @@ mod tests {
         ed.key(Key::Tab, Mods::default());
         click(&mut ed, (10.0, 290.0));
         assert_eq!(ed.sel.unwrap().width(), 400.0, "bare desktop selects the screen");
+    }
+
+    /// The screenshot overlay switches to record mode and back with Ctrl+R
+    /// or its buttons; `clipt record`'s picker (no `can_switch`) doesn't.
+    #[test]
+    fn the_screenshot_overlay_switches_to_recording() {
+        let mut ed = editor(vec![shot("A", 0, 400, 300, 1, [0, 0, 0])], false);
+        let ctrl = Mods { ctrl: true, ..Default::default() };
+        drag(&mut ed, (100.0, 100.0), (200.0, 200.0));
+        assert!(!ed.key(Key::Char('r'), ctrl), "not without can_switch");
+        assert!(!ed.record);
+        ed.can_switch = true;
+        let buttons = |ed: &Editor| ui::toolbar_layout(ed).unwrap().1.into_iter().map(|b| b.1).collect::<Vec<_>>();
+        assert!(buttons(&ed).contains(&ui::Button::RecordMode));
+        assert!(ed.key(Key::Char('r'), ctrl));
+        assert!(ed.record);
+        assert_eq!(
+            buttons(&ed),
+            vec![ui::Button::Record, ui::Button::SystemSound, ui::Button::Mic, ui::Button::ShotMode, ui::Button::Close]
+        );
+        ed.key(Key::Char('s'), Mods::default());
+        assert!(ed.sound.system, "the sound toggles work once switched");
+        ed.key(Key::Enter, Mods::default());
+        assert_eq!(ed.outcome, Some(Outcome::Record));
+        ed.outcome = None;
+        ed.press_button(ui::Button::ShotMode);
+        assert!(!ed.record);
+        assert!(ed.key(Key::Char('r'), Mods::default()) && ed.tool == Tool::Rect, "plain R is still the rectangle");
+        ed.key(Key::Enter, Mods::default());
+        assert_eq!(ed.outcome, Some(Outcome::Copy));
+
+        // The Screenshot | Video switch at the bottom of the screen, there
+        // before anything is selected.
+        let mut ed = editor(vec![shot("A", 0, 1280, 720, 1, [0, 0, 0])], false);
+        assert!(ui::mode_switch_layout(&ed, ed.screens[0].bounds()).is_none(), "not without can_switch");
+        ed.can_switch = true;
+        let (panel, halves) = ui::mode_switch_layout(&ed, ed.screens[0].bounds()).unwrap();
+        assert!(panel.bottom() < 720.0 && panel.top() > 600.0, "{panel:?}");
+        let video = halves.iter().find(|h| h.1).unwrap().0;
+        let shot_half = halves.iter().find(|h| !h.1).unwrap().0;
+        let mid = |r: Rect| (r.left() + r.width() / 2.0, r.top() + r.height() / 2.0);
+        assert_eq!(ed.cursor(), CursorKind::Crosshair);
+        ed.pointer_motion(mid(video), Mods::default());
+        assert_eq!(ed.cursor(), CursorKind::Pointer);
+        assert!(ed.button_press(mid(video), true, Mods::default()));
+        ed.button_release(mid(video), true);
+        assert!(ed.record && ed.sel.is_none(), "a click on it switches, and selects nothing");
+        ed.button_press(mid(video), true, Mods::default());
+        assert!(ed.record, "clicking the current mode keeps it");
+        ed.button_press(mid(shot_half), true, Mods::default());
+        assert!(!ed.record);
     }
 
     #[test]

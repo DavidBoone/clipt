@@ -366,6 +366,20 @@ if [ "$LAYOUT" = single ]; then
   if [ -e /tmp/cfg.bak ]; then mv /tmp/cfg.bak $cfg; else rm -f $cfg; fi
   check "...and off when record_audio has it on (streams: $(a_codec /tmp/rec-ovn.mp4))" '[ -s /tmp/rec-ovn.mp4 ] && [ -z "$(a_codec /tmp/rec-ovn.mp4)" ]'
   gerr
+
+  echo "-- the screenshot overlay switched to video (its Screenshot | Video button)"
+  # The switch sits at the bottom centre of the screen; Video is its right half.
+  tone_on; sleep 0.5
+  /clipt gui >/tmp/gui.out 2>/tmp/gui.err & rp=$!; sleep 0.8
+  act "move 705 676" down up; sleep 0.3
+  drag 100 100 400 300
+  act "key s" "key Return"; sleep 3
+  /clipt record --stop 2>/dev/null; wait $rp; rc=$?
+  tone_off
+  v=$(grep -E "\.mp4$" /tmp/gui.out | tail -1)
+  check "it records the area with sound (rc=$rc, ${v:-no file}: $(vsize "$v" 2>/dev/null), $(a_codec "$v" 2>/dev/null))" \
+    '[ $rc = 0 ] && [ -s "$v" ] && [ "$(a_codec "$v")" = aac ] && [ "$(vsize "$v")" = "$(logical 300 200)" ]'
+  gerr
 fi
 
 exec 3>&-
