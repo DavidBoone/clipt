@@ -37,6 +37,7 @@ _clipt() {
     '--toggle-pause[toggle pausing]'
     '--gif[save the recording as a GIF]'
     '--audio=-[record sound too]::source:(system mic both none)'
+    '--audio-balance=-[duck the other sound under the microphone]::mode:(off duck)'
     '--separate-audio[keep each sound source as its own track]'
     '--no-audio[record without sound]'
   )
@@ -107,6 +108,7 @@ _clipt_args() {
           '--toggle-pause:toggle pausing'
           '--gif:save the recording as a GIF'
           '--audio:record sound too'
+          '--audio-balance:duck the other sound under the microphone'
           '--separate-audio:keep each sound source as its own track'
           '--no-audio:record without sound'
         )

@@ -161,6 +161,16 @@ Several sources are mixed into one track.
 Overrides \fBrecord_audio\fR.
 Needs a PulseAudio or pipewire-pulse sound server; GIFs have no sound.
 .TP
+\fB\-\-audio\-balance\fR \fIMODE\fR
+Duck the other sound under the microphone: \fBoff\fR (the default) or
+\fBduck\fR.
+With \fBduck\fR, the microphone's sound is cleaned up (high-pass,
+compression, de-essing, a 3 kHz presence boost) in the mix only, and the
+other sources dip while the voice speaks.
+Needs the microphone and at least one other source; otherwise it changes
+nothing and says so.
+Overrides \fBrecord_audio_balance\fR.
+.TP
 \fB\-\-separate\-audio\fR
 With several sound sources, also keep each one as its own track after the
 mix, at the volume it was recorded, so the balance can be changed later in an
@@ -281,6 +291,10 @@ An \fB\-o\fR path's extension takes precedence.
 \fBrecord_audio\fR = \fI"none"\fR
 Sound to record, as \fB\-\-audio\fR takes it: \fBnone\fR, \fBsystem\fR,
 \fBmic\fR, \fBboth\fR or a list such as \fB"system:70,mic:120"\fR.
+.TP
+\fBrecord_audio_balance\fR = \fI"off"\fR
+\fBoff\fR or \fBduck\fR, like \fB\-\-audio\-balance\fR: duck the other
+sound under the microphone.
 .TP
 \fBrecord_separate_audio\fR = \fIfalse\fR
 Also keep each sound source as its own track, like \fB\-\-separate\-audio\fR.

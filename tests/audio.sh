@@ -27,9 +27,17 @@ sound_server() {
 # tone_on [FREQ SINK]: 1 kHz into the system sink by default.
 tone_on()  { ffmpeg -nostdin -loglevel error -re -f lavfi -i sine=frequency=${1:-1000}:sample_rate=48000 -ac 2 -f pulse -device ${2:-clipt} tone & TONES="${TONES:-} $!"; }
 tone_off() { kill $TONES 2>/dev/null; wait $TONES 2>/dev/null; TONES=; }
+# The microphone's tone, started and stopped on its own so the system tone
+# can keep playing: the ducking test needs the voice for only part of it.
+MIC_TONE=
+mic_tone_on()  { ffmpeg -nostdin -loglevel error -re -f lavfi -i sine=frequency=${1:-440}:sample_rate=48000 -ac 2 -f pulse -device mic tone & MIC_TONE=$!; }
+mic_tone_off() { kill $MIC_TONE 2>/dev/null; wait $MIC_TONE 2>/dev/null; MIC_TONE=; }
 # band_db FILE TRACK FREQ: mean level of one frequency in sound track TRACK
 # (0-based), from 2 s in (PulseAudio's first second or so is silent).
 band_db()  { ffmpeg -nostats -ss 2 -i "$1" -map 0:a:$2 -af "bandpass=f=$3:width_type=q:w=20,volumedetect" -f null - 2>&1 | sed -n 's/.*mean_volume: \(-*[0-9.]*\) dB/\1/p'; }
+# band_db_seg FILE START LENGTH TRACK FREQ: the same for a stretch of the
+# recording, in seconds from its start.
+band_db_seg() { ffmpeg -nostats -i "$1" -map 0:a:$4 -af "atrim=start=$2:duration=$3,bandpass=f=$5:width_type=q:w=20,volumedetect" -f null - 2>&1 | sed -n 's/.*mean_volume: \(-*[0-9.]*\) dB/\1/p'; }
 # Track names: Matroska's titles, or MP4's handler names.
 titles()   { ffprobe -v error -select_streams a -show_entries stream_tags=title,handler_name -of default=nw=1:nk=1 "$1" 2>/dev/null | tr '\n' ',' | sed 's/,$//'; }
 # Mean and peak level of a file's sound, in dB.
@@ -100,6 +108,44 @@ audio_tests() {
   m4=$(band_db /tmp/snd-n.mp4 0 440); m1=$(band_db /tmp/snd-n.mp4 0 1000)
   check "a device by name records it (${m4} dB at 440 Hz, ${m1} at 1 kHz)" 'awk "BEGIN{exit !($m4 > -35 && $m4 - $m1 > 20)}"'
   tone_off
+
+  echo "-- recording: ducking under the microphone"
+  # The system's 1 kHz tone plays throughout; the microphone's 440 Hz tone
+  # only in the middle, so the 1 kHz band shows the dip. Windows are well
+  # clear of PulseAudio's silent first second and of the tone's start and
+  # stop, which can each lag by about a second: before 2-3 s, during
+  # 5-6.5 s, after 9-10 s.
+  tone_on 1000 clipt; sleep 0.5
+  CLIPT_DEBUG=1 /clipt record -g "$g" --audio=both --audio-balance=duck -o /tmp/snd-duck.mp4 2>/tmp/snd.err & rp=$!
+  sleep 3.5
+  mic_tone_on; sleep 4.5
+  mic_tone_off; sleep 3.5
+  /clipt record --stop; wait $rp; rc=$?
+  tone_off
+  local b=$(band_db_seg /tmp/snd-duck.mp4 2.0 1.0 0 1000)
+  local d=$(band_db_seg /tmp/snd-duck.mp4 5.0 1.5 0 1000)
+  local a=$(band_db_seg /tmp/snd-duck.mp4 9.0 1.0 0 1000)
+  local v=$(band_db_seg /tmp/snd-duck.mp4 5.0 1.5 0 440)
+  check "duck: the system sound is 8 dB lower while the microphone plays (${b} / ${d} / ${a} dB at 1 kHz; microphone ${v} dB; rc=$rc)" \
+    'awk "BEGIN{exit !($b > -35 && $a > -35 && $v > -35 && $b - $d >= 8 && $a - $d >= 8 && ($a - $b) < 3 && ($b - $a) < 3)}"'
+  grep -E "audio balance" /tmp/snd.err | sed 's/^clipt: /  /'
+
+  # The default, off, must leave the levels as they were.
+  tone_on 1000 clipt; sleep 0.5
+  /clipt record -g "$g" --audio=both -o /tmp/snd-off.mp4 2>/tmp/snd.err & rp=$!
+  sleep 3.5
+  mic_tone_on; sleep 4.5
+  mic_tone_off; sleep 3.5
+  /clipt record --stop; wait $rp
+  tone_off
+  b=$(band_db_seg /tmp/snd-off.mp4 2.0 1.0 0 1000)
+  d=$(band_db_seg /tmp/snd-off.mp4 5.0 1.5 0 1000)
+  check "off: the system sound keeps its level while the microphone plays (${b} / ${d} dB)" \
+    'awk "BEGIN{exit !($b > -35 && $d > -35 && ($b - $d) < 3 && ($d - $b) < 3)}"'
+
+  /clipt record -g "$g" --audio=system --audio-balance=duck -o /tmp/snd-nomic.mp4 2>/tmp/snd.err & rp=$!
+  sleep 1.5; /clipt record --stop; wait $rp
+  check "duck without a microphone says so and records as usual" 'grep -q "audio balance: no microphone to duck under" /tmp/snd.err && [ -s /tmp/snd-nomic.mp4 ]'
 
   # Refusals run under a time limit: if one isn't refused, the recording
   # would otherwise run until max_duration.

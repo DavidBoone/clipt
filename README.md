@@ -82,8 +82,10 @@ or as a GIF with `--gif` (or `record_format = "gif"`). `--audio` (or
 through a PulseAudio or pipewire-pulse server. `--audio=mic`, `both`, or a
 list of sources with volumes (`system:70,mic:120`, device names from `clipt
 list sound`) mixes several into one track; `--separate-audio` also keeps
-each as its own track, to rebalance later in an editor. With speakers rather
-than headphones the microphone hears the system sound too.
+each as its own track, to rebalance later in an editor. `--audio-balance=duck`
+(or `record_audio_balance = "duck"`) cleans up the microphone's sound in the
+mix and dips the other sources while you speak. With speakers rather than
+headphones the microphone hears the system sound too.
 It needs `ffmpeg` and uses the GPU encoder when there is one (VA-API on AMD
 and Intel, NVENC on NVIDIA), libx264 otherwise. It works on wlroots-family
 compositors (Sway, Hyprland, niri, labwc, river, COSMIC) directly, and on KDE

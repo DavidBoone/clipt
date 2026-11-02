@@ -214,12 +214,44 @@ const RESAMPLE: &str = "aresample=async=1:first_pts=0";
 const MIX: &str = "amix=duration=longest:normalize=0";
 const AAC: [&str; 4] = ["-c:a", "aac", "-b:a", "160k"];
 
+/// What `record_audio_balance` / `--audio-balance` asks for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Balance {
+    #[default]
+    Off,
+    /// Clean up the microphone's sound and duck the other sources under it.
+    Duck,
+}
+
+impl Balance {
+    /// A `record_audio_balance` value or `--audio-balance` argument.
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.trim() {
+            "off" => Ok(Self::Off),
+            "duck" => Ok(Self::Duck),
+            other => bail!("unknown audio balance '{other}' (off, duck)"),
+        }
+    }
+}
+
+/// Voice clean-up for `duck`, from the phase 4 spike: high-pass at 80 Hz,
+/// 3:1 compression from -30 dB (threshold 0.0316), de-essing and a 3 kHz
+/// presence boost. The spike's 4 dB make-up left the voice 5.5 dB quieter;
+/// 9.5 dB (`makeup=3`) brings the cleaned voice back to the raw one's level.
+const CLEAN_MIC: &str = "highpass=f=80,acompressor=threshold=0.0316:ratio=3:makeup=3.0,deesser,equalizer=f=3000:width_type=q:w=1:g=3";
+/// The ducking from the spike: about 11 dB of dip while the voice speaks.
+const DUCK: &str = "sidechaincompress=threshold=0.02:ratio=8:attack=20:release=300";
+
 /// The sound tracks of a recording: one per source, mixed at these volumes.
 pub struct Sound {
     pub volumes: Vec<f32>,
     pub labels: Vec<String>,
     /// Also keep each source as its own track, at the volume it was recorded.
     pub separate: bool,
+    /// The microphone's source index, when it is recorded: the voice `duck`
+    /// works on. A named microphone device isn't the voice.
+    pub voice: Option<usize>,
+    pub balance: Balance,
 }
 
 impl Sound {
@@ -230,14 +262,22 @@ impl Sound {
         let name = if mov { "handler_name" } else { "title" };
         let n = self.volumes.len();
         let separate = self.separate && n > 1;
-        let vol = |v: f32| if (v - 1.0).abs() < 1e-6 { String::new() } else { format!(",volume={v}") };
+        // `duck` needs the microphone and something to duck under it.
+        let duck = (self.balance == Balance::Duck && n > 1).then_some(self.voice).flatten().filter(|&v| v < n);
+        if self.balance == Balance::Duck && duck.is_none() {
+            eprintln!("clipt: audio balance: no microphone to duck under");
+        }
         let mut graph = Vec::new();
-        for (i, &v) in self.volumes.iter().enumerate() {
-            graph.push(if separate {
-                format!("[0:a:{i}]{RESAMPLE},asplit=2[m{i}][t{i}];[m{i}]volume={v}[v{i}]")
-            } else {
-                format!("[0:a:{i}]{RESAMPLE}{}[v{i}]", vol(v))
-            });
+        if let Some(voice) = duck {
+            self.duck_graph(voice, separate, &mut graph);
+        } else {
+            for (i, &v) in self.volumes.iter().enumerate() {
+                graph.push(if separate {
+                    format!("[0:a:{i}]{RESAMPLE},asplit=2[m{i}][t{i}];[m{i}]volume={v}[v{i}]")
+                } else {
+                    format!("[0:a:{i}]{RESAMPLE}{}[v{i}]", volume_arg(v))
+                });
+            }
         }
         let mix = if n == 1 {
             "v0".to_string()
@@ -257,6 +297,41 @@ impl Sound {
         a.extend(AAC.iter().map(|s| s.to_string()));
         a
     }
+
+    /// The `duck` graph: the microphone through the clean-up chain, feeding
+    /// both the mix and the ducking keys; every other source, after its
+    /// volume, is sidechained to the voice.
+    fn duck_graph(&self, voice: usize, separate: bool, graph: &mut Vec<String>) {
+        let others: Vec<usize> = (0..self.volumes.len()).filter(|&i| i != voice).collect();
+        // The clean voice is split into the mix and the keys. One key is
+        // named directly; several need a second split.
+        let key = if others.len() == 1 { format!("[k{}]", others[0]) } else { "[key]".to_string() };
+        if separate {
+            graph.push(format!("[0:a:{voice}]{RESAMPLE},asplit=2[wet{voice}][t{voice}]"));
+            graph.push(format!("[wet{voice}]{CLEAN_MIC},asplit=2[m{voice}]{key}"));
+        } else {
+            graph.push(format!("[0:a:{voice}]{RESAMPLE},{CLEAN_MIC},asplit=2[m{voice}]{key}"));
+        }
+        graph.push(format!("[m{voice}]volume={}[v{voice}]", self.volumes[voice]));
+        if others.len() > 1 {
+            let keys: String = others.iter().map(|i| format!("[k{i}]")).collect();
+            graph.push(format!("[key]asplit={}{keys}", others.len()));
+        }
+        for &i in &others {
+            let v = self.volumes[i];
+            graph.push(if separate {
+                format!("[0:a:{i}]{RESAMPLE},asplit=2[m{i}][t{i}];[m{i}]volume={v}[w{i}]")
+            } else {
+                format!("[0:a:{i}]{RESAMPLE}{}[w{i}]", volume_arg(v))
+            });
+            graph.push(format!("[w{i}][k{i}]{DUCK}[v{i}]"));
+        }
+    }
+}
+
+/// A source's filter argument for its volume, omitted when it is 100 %.
+fn volume_arg(v: f32) -> String {
+    if (v - 1.0).abs() < 1e-6 { String::new() } else { format!(",volume={v}") }
 }
 
 pub struct Encoder {
@@ -526,6 +601,8 @@ mod tests {
             volumes: v.to_vec(),
             labels: v.iter().enumerate().map(|(i, _)| format!("S{i}")).collect(),
             separate,
+            voice: None,
+            balance: Balance::Off,
         };
         let graph = |s: &Sound| s.args(false)[1].clone();
         let maps = |s: &Sound| s.args(false).windows(2).filter(|w| w[0] == "-map").map(|w| w[1].clone()).collect::<Vec<_>>();
@@ -544,6 +621,92 @@ mod tests {
         assert_eq!(maps(&sep), ["0:v", "[mix]", "[t0]", "[t1]"]);
         assert!(sep.args(false).windows(2).any(|w| w == ["-metadata:s:a:2", "title=S1"]));
         assert!(sep.args(true).windows(2).any(|w| w == ["-metadata:s:a:0", "handler_name=Mix"]), "MP4 names tracks by handler");
+    }
+
+    #[test]
+    fn duck_graphs() {
+        let s = |v: &[f32], separate, voice, balance| Sound {
+            volumes: v.to_vec(),
+            labels: v.iter().enumerate().map(|(i, _)| format!("S{i}")).collect(),
+            separate,
+            voice,
+            balance,
+        };
+        let graph = |s: &Sound| s.args(false)[1].clone();
+        let maps = |s: &Sound| s.args(false).windows(2).filter(|w| w[0] == "-map").map(|w| w[1].clone()).collect::<Vec<_>>();
+        // The microphone is cleaned up into the mix and split into the
+        // ducking keys; the other source is sidechained after its volume.
+        let duck = s(&[0.7, 1.0], false, Some(1), Balance::Duck);
+        assert_eq!(
+            graph(&duck),
+            format!(
+                "[0:a:1]{RESAMPLE},{CLEAN_MIC},asplit=2[m1][k0];[m1]volume=1[v1];\
+                 [0:a:0]{RESAMPLE},volume=0.7[w0];[w0][k0]{DUCK}[v0];[v0][v1]{MIX}:inputs=2[mix]"
+            )
+        );
+        assert_eq!(maps(&duck), ["0:v", "[mix]"]);
+        // Separate tracks stay as recorded: the microphone is split before
+        // the clean-up, and the other source before its volume.
+        let sep = s(&[0.7, 1.0], true, Some(1), Balance::Duck);
+        assert_eq!(
+            graph(&sep),
+            format!(
+                "[0:a:1]{RESAMPLE},asplit=2[wet1][t1];[wet1]{CLEAN_MIC},asplit=2[m1][k0];[m1]volume=1[v1];\
+                 [0:a:0]{RESAMPLE},asplit=2[m0][t0];[m0]volume=0.7[w0];[w0][k0]{DUCK}[v0];[v0][v1]{MIX}:inputs=2[mix]"
+            )
+        );
+        assert_eq!(maps(&sep), ["0:v", "[mix]", "[t0]", "[t1]"]);
+        // `off` is the graph without any of that.
+        let off = s(&[0.7, 1.0], false, Some(1), Balance::Off);
+        assert!(!graph(&off).contains(CLEAN_MIC) && !graph(&off).contains(DUCK));
+        // Without a microphone, `duck` changes nothing.
+        let no_mic = s(&[0.7, 1.0], false, None, Balance::Duck);
+        assert_eq!(no_mic.args(false), s(&[0.7, 1.0], false, None, Balance::Off).args(false));
+        // Nor with the microphone alone.
+        let mic_only = s(&[1.0], false, Some(0), Balance::Duck);
+        assert_eq!(graph(&mic_only), format!("[0:a:0]{RESAMPLE}[v0]"));
+        assert_eq!(maps(&mic_only), ["0:v", "[v0]"]);
+        // Several other sources each get their own key.
+        let three = s(&[1.0, 1.0, 1.0], false, Some(1), Balance::Duck);
+        assert!(graph(&three).contains("[key]asplit=2[k0][k2]"), "{}", graph(&three));
+        assert_eq!(Balance::parse("off").unwrap(), Balance::Off);
+        assert_eq!(Balance::parse("duck").unwrap(), Balance::Duck);
+        assert!(Balance::parse("smart").is_err(), "smart is a later phase");
+    }
+
+    /// Mean level (dBFS) of a lavfi `source` through `filter`, as
+    /// volumedetect reports it.
+    fn mean_volume(source: &str, filter: &str) -> f64 {
+        let af = if filter.is_empty() { "volumedetect".to_string() } else { format!("{filter},volumedetect") };
+        let out = Command::new("ffmpeg")
+            .args(["-hide_banner", "-nostats", "-f", "lavfi", "-i", source, "-af", &af, "-f", "null", "-"])
+            .stdin(Stdio::null())
+            .output()
+            .expect("running ffmpeg");
+        assert!(out.status.success(), "ffmpeg failed: {}", String::from_utf8_lossy(&out.stderr));
+        let err = String::from_utf8_lossy(&out.stderr);
+        err.lines()
+            .find_map(|l| l.split_once("mean_volume:").map(|(_, v)| v.split_whitespace().next().unwrap_or("").to_string()))
+            .and_then(|v| v.parse().ok())
+            .expect("volumedetect reported no mean level")
+    }
+
+    /// The clean-up chain leaves the voice at its recorded level: within 1 dB
+    /// of the raw voice on speech-like sound at about -23 dBFS mean, the
+    /// spike's voice level. With the spike's 4 dB make-up the same signal
+    /// comes out 5.6 dB quieter; it measured 5.5 dB there.
+    #[test]
+    fn duck_cleanup_keeps_the_voice_level() {
+        let _ffmpeg = FFMPEG.lock().unwrap_or_else(|e| e.into_inner());
+        if Command::new("ffmpeg").arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_err() {
+            return;
+        }
+        // A voiced vowel, modulated at a syllable rate with pauses: the
+        // speech-shaped stand-in for the spike's reading.
+        let voice = "aevalsrc='(0.152*sin(2*PI*130*t)+0.091*sin(2*PI*260*t)+0.053*sin(2*PI*520*t)+0.030*sin(2*PI*1040*t)+0.015*sin(2*PI*2080*t))*if(lt(mod(t,0.82),0.2),1,if(lt(mod(t,0.82),0.5),0.3,0.05))':s=48000:d=10";
+        let raw = mean_volume(voice, "");
+        let cleaned = mean_volume(voice, CLEAN_MIC);
+        assert!((raw - cleaned).abs() < 1.0, "cleaned voice is {:.2} dB from the raw one ({raw:.1} -> {cleaned:.1} dBFS)", cleaned - raw);
     }
 
     #[test]
