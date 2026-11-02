@@ -249,8 +249,8 @@ perfect. YAMNet's speech score is the smoothed sum of its speech classes.
 This is the strongest result in the spike. On a clean voice source YAMNet
 separates speech from music and noise completely, where nnnoiseless was near
 chance. The separation weakens when the music is under the speech, but 0.83
-at −10 dB is still far better than nnnoiseless's music results. The speech
-score does not need a clean voice source in the way nnnoiseless does.
+at −10 dB is still far better than nnnoiseless's music results: the speech
+score still works with music under the speech, where nnnoiseless's did not.
 
 The lower speech-against-pauses figure (0.926 against 0.984) is a window
 artefact: a 0.96 s window can straddle the edit boundary, and the reference
