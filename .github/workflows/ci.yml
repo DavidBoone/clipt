@@ -1,9 +1,14 @@
 name: ci
 
+# Skipped when every changed file is documentation; the spell check, which
+# docs need most, is its own workflow (typos.yml) and always runs. Anything
+# else, including data/ (man page, completions) and .github/, runs it all.
 on:
   push:
     branches: [main]
+    paths-ignore: ["**.md", "docs/**", "LICENSE-*"]
   pull_request:
+    paths-ignore: ["**.md", "docs/**", "LICENSE-*"]
   workflow_dispatch:
 
 permissions:
@@ -95,13 +100,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
-
-  typos:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - uses: crate-ci/typos@v1
 
   # Real compositors in containers, driven by scripted input; every capture is
   # checked against grim or the expected native size.

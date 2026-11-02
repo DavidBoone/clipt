@@ -1,0 +1,24 @@
+name: typos
+
+# Spelling, on every change: unlike ci.yml it runs for documentation-only
+# changes too, which is where most of the prose is.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: typos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: crate-ci/typos@v1
