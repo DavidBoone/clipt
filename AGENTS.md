@@ -20,8 +20,10 @@ file says which checks matter for which change, and the house style.
 
 ## Checks by kind of change
 
-CI runs everything on every push, so a PR is only ready when all of it is
-green. Locally, run what the change can break:
+CI runs everything on every push, except that a change touching only
+Markdown, `docs/` or the licence files runs just the spell check
+(`typos`); a PR is only ready when all of what ran is green. Locally, run
+what the change can break:
 
 | Change | Run |
 |---|---|

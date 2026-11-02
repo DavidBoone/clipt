@@ -5,7 +5,9 @@ the most: they show the monitor layout, scales and the capture backend in use.
 
 ## Checks
 
-CI runs these on every push and pull request; please run them first:
+CI runs these on every push and pull request (only `typos` when the change
+touches nothing but Markdown, `docs/` or the licence files); please run them
+first:
 
 ```
 cargo fmt --check
