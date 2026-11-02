@@ -88,6 +88,12 @@ the same signal paths.
 | `noise_white.wav` | 36.5 s synthetic white noise, −20 dBFS RMS | NumPy, seed 20261101 | none |
 | `noise_pink.wav` | 36.5 s synthetic pink noise, −20 dBFS RMS | ffmpeg `anoisesrc=color=pink` | none |
 
+The speech edit takes these runs: from `spc190_ahareyoudiggingonmygrave_wm`
+4.7–7.1, 9.0–12.3 and 24.9–27.2 s; from
+`spc190_arithmeticonthefrontier_js` 10.5–13.8, 15.5–18.0 and 29.0–31.0 s;
+and from `spc190_barter_agh` 3.5–6.1 and 14.6–16.7 s. Each run is faded over
+10 ms; 2 s of lead, 1.5 s gaps and 2 s of tail make the 36.5 s file.
+
 The music excerpts are peak-normalised to 0.9; the mixes are scaled so their
 peaks stay below 0.99. The three songs are one artist and one album, but the
 vocal and NoVox versions of each song control for the backing music.
@@ -346,8 +352,8 @@ The program is not committed. To redo it:
 4. Test audio: the three Josh Woodward song pairs from the archive.org items
    in *Test material*, the LibriVox speech edit (the eight intervals are
    2.0–4.4, 5.9–9.2, 10.7–13.0, 14.5–17.8, 19.3–21.8, 23.3–25.3,
-   26.8–29.4 and 30.9–33.0 s), the mixes and the two noise files. The
-   research's `build.py` describes how the speech and noise files were made.
+   26.8–29.4 and 30.9–33.0 s), the mixes and the two noise files. The runs
+   and the noise generation are described in *Test material*.
 5. Set `RAYON_NUM_THREADS=1` for single-threaded timings.
 
 The model's class map was downloaded only to choose and document the
