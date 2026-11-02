@@ -32,6 +32,10 @@ tone_off() { kill $TONES 2>/dev/null; wait $TONES 2>/dev/null; TONES=; }
 MIC_TONE=
 mic_tone_on()  { ffmpeg -nostdin -loglevel error -re -f lavfi -i sine=frequency=${1:-440}:sample_rate=48000 -ac 2 -f pulse -device mic tone & MIC_TONE=$!; }
 mic_tone_off() { kill $MIC_TONE 2>/dev/null; wait $MIC_TONE 2>/dev/null; MIC_TONE=; }
+# noise_on SINK AMPLITUDE: pink noise, speech-like enough for smart to judge
+# (tones fill one band each, which turning anything down can't help).
+noise_on()  { ffmpeg -nostdin -loglevel error -re -f lavfi -i anoisesrc=c=pink:a=$2:r=48000 -ac 2 -f pulse -device $1 noise & NOISE="${NOISE:-} $!"; }
+noise_off() { kill $NOISE 2>/dev/null; wait $NOISE 2>/dev/null; NOISE=; }
 # band_db FILE TRACK FREQ: mean level of one frequency in sound track TRACK
 # (0-based), from 2 s in (PulseAudio's first second or so is silent).
 band_db()  { ffmpeg -nostats -ss 2 -i "$1" -map 0:a:$2 -af "bandpass=f=$3:width_type=q:w=20,volumedetect" -f null - 2>&1 | sed -n 's/.*mean_volume: \(-*[0-9.]*\) dB/\1/p'; }
@@ -156,6 +160,20 @@ audio_tests() {
   b=$(band_db_seg /tmp/snd-smart.mp4 2.0 1.0 0 1000)
   check "smart: ducks, and reports clarity ($(grep -E 'speech clarity|hears the other' /tmp/snd.err | head -1 | sed 's/^clipt: //'); ${b} / ${d} dB; rc=$rc)" \
     '[ $rc = 0 ] && grep -qE "speech clarity|hears the other sound" /tmp/snd.err && awk "BEGIN{exit !($b - $d >= 8)}"'
+  grep -E "clarity:" /tmp/snd.err | sed 's/^clipt: /  /'
+
+  # Noise on the microphone under louder noise from the system: unclear, so
+  # smart mixes again with the system quieter, and removes what it kept.
+  noise_on clipt 0.5; sleep 0.5
+  CLIPT_DEBUG=1 /clipt record -g "$g" --audio=both --audio-balance=smart -o /tmp/snd-remix.mp4 2>/tmp/snd.err & rp=$!
+  sleep 2.5
+  noise_on mic 0.15; sleep 7
+  /clipt record --stop; wait $rp; rc=$?
+  noise_off
+  local before=$(sed -n 's/.*speech clarity \([0-9.]*\), .*/\1/p' /tmp/snd.err | head -1)
+  local after=$(sed -n 's/^clipt: re-mixed: speech clarity \([0-9.]*\).*/\1/p' /tmp/snd.err)
+  check "smart: re-mixes an unclear recording (${before:-?} -> ${after:-?}; rc=$rc; $(grep -E 're-mix' /tmp/snd.err | head -1 | sed 's/^clipt: //'))" \
+    '[ $rc = 0 ] && [ -n "$before" ] && [ -n "$after" ] && awk "BEGIN{exit !($after > $before)}" && [ "$(a_codec /tmp/snd-remix.mp4)" = aac ] && ! ls -a /tmp | grep -q clipt-sound && ! ls -a /tmp | grep -q clipt-remix'
   grep -E "clarity:" /tmp/snd.err | sed 's/^clipt: /  /'
 
   /clipt record -g "$g" --audio=system --audio-balance=duck -o /tmp/snd-nomic.mp4 2>/tmp/snd.err & rp=$!

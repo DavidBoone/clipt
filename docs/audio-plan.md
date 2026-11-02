@@ -243,8 +243,23 @@ Done so far:
   ducking's dip is set by the voice alone, so turning the other sources
   down lowers them by exactly that in the mix. From the 10 dB recording it
   predicts 6 dB (so 16 dB); remade at 15.5 dB it measures 0.748 and
-  predicts the same 16. So the at-stop re-mix, next, needs no search: one
-  pass at the computed volume.
+  predicts the same 16. So the at-stop re-mix needs no search: one pass
+  at the computed volume.
+- **The re-mix** (the same option): while recording, `smart` also keeps
+  each source as recorded in a hidden FLAC file beside the video
+  (`.NAME.clipt-sound.mka`; 0.3 Mbit/s for speech, 0.5 for music, so
+  150–250 MB an hour per source). Below 0.75, and
+  without a leak, one ffmpeg pass mixes again from it with the other
+  sources the computed amount quieter (at most 20 dB: past that the other
+  sound is gone, not under the voice; and only if that raises the clarity
+  by 0.05, so a voice that is itself the problem is left alone), copies the video, encodes the mix
+  and any separate tracks again, measures the result the same way, and
+  replaces the file. The kept file goes however the recording ends. A
+  band where the voice has next to nothing (60 dB under its strongest)
+  now counts for nothing: otherwise a band silent in both reads as half
+  heard, and better as the rest is turned down. The spike's numbers are
+  unchanged by it. Unit test: a voice under pink noise 10 dB louder
+  measures 0.41 and asks for 10.5 dB; the re-mix measures 0.76.
 
 ## Smart balance (phase 4)
 

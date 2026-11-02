@@ -35,6 +35,9 @@ const LEAK_THRESHOLD: f32 = 0.3;
 /// The target, and a safe margin, from the spike.
 const TARGET: f32 = 0.75;
 const GOOD: f32 = 0.90;
+/// The re-mix turns the other sound down at most this much: past it, the
+/// other sound is gone rather than under the voice.
+pub const MAX_DOWN: f32 = 20.0;
 
 /// A low-pass biquad section (RBJ cookbook), transposed direct form II.
 #[derive(Clone, Copy)]
@@ -157,9 +160,16 @@ struct Frame {
 }
 
 impl Frame {
-    /// With the rest `down` dB quieter than it was.
+    /// With the rest `down` dB quieter than it was. A band where the voice
+    /// has next to nothing (60 dB under its strongest) carries none of it,
+    /// however quiet the rest is there: without this, a band silent in both
+    /// counts as half heard, and more as the rest is turned down.
     fn sii(&self, down: f32) -> f32 {
-        (0..6).map(|i| WEIGHTS[i] * ((self.voice_bands[i] - self.rest_bands[i] + down + 15.0) / 30.0).clamp(0.0, 1.0)).sum()
+        let loudest = self.voice_bands.iter().copied().fold(f32::MIN, f32::max);
+        (0..6)
+            .filter(|&i| self.voice_bands[i] > loudest - 60.0)
+            .map(|i| WEIGHTS[i] * ((self.voice_bands[i] - self.rest_bands[i] + down + 15.0) / 30.0).clamp(0.0, 1.0))
+            .sum()
     }
 }
 
@@ -170,13 +180,23 @@ fn clarity_at(speech: &[&Frame], down: f32) -> f32 {
     sii[sii.len() / 10]
 }
 
-/// How much quieter the rest must be for the target, to the half decibel:
+/// How much quieter to make the rest, and the clarity that would give:
 /// ducking dips the other sources by an amount set by the voice alone, so
 /// turning them down by some dB lowers them by exactly that in the mix, and
-/// the frames already measured say what the clarity would be. `None` if it
-/// already meets the target; 30 dB at most.
-fn needed(speech: &[&Frame]) -> Option<f32> {
-    (0..=60).map(|h| h as f32 / 2.0).find(|&down| clarity_at(speech, down) >= TARGET).or(Some(30.0)).filter(|&d| d > 0.0)
+/// the frames already measured say what the clarity would be. The least,
+/// to the half decibel, that reaches the target; failing that `MAX_DOWN`,
+/// if that helps at all (by 0.05). `None` if it's good already or turning
+/// the rest down wouldn't help.
+fn needed(speech: &[&Frame], now: f32) -> Option<(f32, f32)> {
+    if now >= TARGET {
+        return None;
+    }
+    let steps = (MAX_DOWN * 2.0) as u32;
+    (1..=steps)
+        .map(|h| h as f32 / 2.0)
+        .map(|down| (down, clarity_at(speech, down)))
+        .find(|&(_, c)| c >= TARGET)
+        .or_else(|| Some((MAX_DOWN, clarity_at(speech, MAX_DOWN))).filter(|&(_, c)| c >= now + 0.05))
 }
 
 /// One 1 s leakage window: the voice's and the rest's level, and the
@@ -278,7 +298,7 @@ impl Analyzer {
         gaps.sort_by(f32::total_cmp);
         let clarity = sii[sii.len() / 10];
         let gap = gaps[gaps.len() / 2];
-        let quieter = needed(&speech);
+        let quieter = needed(&speech, clarity);
 
         let mut with_rest: Vec<&Window> = self.windows.iter().filter(|w| w.rest > REST_FLOOR_DB).collect();
         with_rest.sort_by(|a, b| a.voice.total_cmp(&b.voice));
@@ -366,13 +386,13 @@ pub enum Leak {
 pub enum Report {
     TooLittleSpeech,
     /// `clarity`: the 10th-percentile SII; `gap`: the median dB the voice is
-    /// over the rest while speaking; `quieter`: how many dB quieter the rest
-    /// would need to be for a good clarity, when it isn't.
+    /// over the rest while speaking; `quieter`: when the clarity isn't good,
+    /// how many dB quieter the rest should be, and the clarity that gives.
     Measured {
         clarity: f32,
         gap: f32,
         leak: Leak,
-        quieter: Option<f32>,
+        quieter: Option<(f32, f32)>,
     },
 }
 
@@ -410,8 +430,9 @@ impl fmt::Display for Report {
                 };
                 write!(f, "speech clarity {clarity:.2}, {verdict}")?;
                 match quieter {
-                    Some(d) if d >= 30.0 => write!(f, "; even 30 dB quieter wouldn't make it good")?,
-                    Some(d) => write!(f, "; the other sound about {d:.0} dB quieter would make it good")?,
+                    Some((d, c)) if c >= TARGET => write!(f, "; the other sound {d:.1} dB quieter would make it good")?,
+                    Some((d, c)) => write!(f, "; the other sound {d:.0} dB quieter would raise it to {c:.2}")?,
+                    None if clarity < TARGET => write!(f, "; turning the other sound down wouldn't help much")?,
                     None => {}
                 }
                 if leak == Leak::Unchecked {
@@ -496,11 +517,18 @@ mod tests {
     #[test]
     fn says_how_much_quieter() {
         let r = run(12, 5.0, None);
-        let Report::Measured { quieter: Some(d), .. } = r else { panic!("{r:?}") };
-        assert!((d - 4.5).abs() <= 0.5, "{d} dB");
-        assert!(r.to_string().contains(&format!("about {d:.0} dB quieter")), "{r}");
+        let Report::Measured { quieter: Some((d, c)), .. } = r else { panic!("{r:?}") };
+        assert!((d - 4.5).abs() <= 0.5 && c >= TARGET, "{d} dB, {c}");
+        assert!(r.to_string().contains(&format!("{d:.1} dB quieter would make it good")), "{r}");
         assert!(matches!(run(12, 30.0, None), Report::Measured { quieter: None, .. }));
-        assert!(matches!(run(12, -40.0, None), Report::Measured { quieter: Some(30.0), .. }));
+        // 30 dB under the rest: 20 dB quieter takes it from 0 to about 0.11.
+        let r = run(12, -30.0, None);
+        assert!(matches!(r, Report::Measured { quieter: Some((MAX_DOWN, c)), .. } if c > 0.05 && c < TARGET), "{r:?}");
+        assert!(r.to_string().contains("20 dB quieter would raise it to"), "{r}");
+        // 50 dB under: 20 dB quieter doesn't help.
+        let r = run(12, -50.0, None);
+        assert!(matches!(r, Report::Measured { quieter: None, .. }), "{r:?}");
+        assert!(r.to_string().contains("wouldn't help much"), "{r}");
     }
 
     #[test]
