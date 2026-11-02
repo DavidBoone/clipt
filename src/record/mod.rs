@@ -485,7 +485,13 @@ pub fn run(cfg: &Config, opts: Options) -> Result<()> {
         });
     }
 
-    let result = match (write_loop(cfg, &lock, &slot, &codec, fps, zoom, sound.as_ref(), &path, &captured), gif) {
+    let written = write_loop(cfg, &lock, &slot, &codec, fps, zoom, sound.as_ref(), &path, &captured);
+    // `smart` kept the sound as recorded beside the video for the re-mix,
+    // which is over now, however the recording ended.
+    if sound.as_ref().is_some_and(encode::Sound::analyses) {
+        let _ = std::fs::remove_file(encode::kept_path(&path));
+    }
+    let result = match (written, gif) {
         (Ok((_, duration)), true) => encode::to_gif(&path, &target, fps.min(15), duration).map(|()| {
             let _ = std::fs::remove_file(&path);
             "GIF".to_string()
@@ -930,6 +936,23 @@ fn write_loop(
     if let Some(r) = &clarity {
         eprintln!("clipt: {r}");
     }
+    let mut summary = clarity.map(|r| format!(", {}", r.summary())).unwrap_or_default();
+    if let (Some(s), Some(clarity::Report::Measured { clarity: before, quieter: Some((d, _)), leak, .. })) = (sound, clarity)
+        && leak != clarity::Leak::Heard
+    {
+        eprintln!("clipt: re-mixing with the other sound {d:.1} dB quieter");
+        match encode::remix(s, path, d, Duration::from_millis(end)) {
+            Ok(after) => {
+                if let Some(after) = after {
+                    eprintln!("clipt: re-mixed: {after}");
+                }
+                if let Some(clarity::Report::Measured { clarity: after, .. }) = after {
+                    summary = format!(", speech clarity {before:.2}, {after:.2} re-mixed with the other sound {d:.1} dB quieter");
+                }
+            }
+            Err(e) => eprintln!("clipt: {e:#}; the recording is as it was"),
+        }
+    }
     let secs = end as f64 / 1000.0;
     if std::env::var_os("CLIPT_DEBUG").is_some() {
         let c = captured.load(Ordering::Relaxed);
@@ -939,8 +962,7 @@ fn write_loop(
             eprintln!("clipt: {chunks} sound chunks sent from {sources} source(s) ({:.1} s each)", chunks as f64 * 0.02 / sources as f64);
         }
     }
-    let clarity = clarity.map(|r| format!(", {}", r.summary())).unwrap_or_default();
-    Ok((format!("{secs:.0} s, {}{}{clarity}", codec.name(), if sources > 0 { ", AAC" } else { "" }), Duration::from_millis(end)))
+    Ok((format!("{secs:.0} s, {}{}{summary}", codec.name(), if sources > 0 { ", AAC" } else { "" }), Duration::from_millis(end)))
 }
 
 /// The pauses so far, in order; the last may still be running.
