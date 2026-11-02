@@ -6,6 +6,8 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-02
+
 ### Fixed
 - Pasting a screenshot into Chromium-based apps (Edge, Teams, Chrome)
   could give only the top of the image, grey below: those apps hand over a
