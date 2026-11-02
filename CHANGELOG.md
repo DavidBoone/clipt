@@ -6,6 +6,8 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-02
+
 ### Added
 - Window highlighting on GNOME, through an optional GNOME Shell extension
   (`clipt gnome-extension` installs it; it answers only clipt). GNOME
