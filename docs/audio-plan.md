@@ -194,13 +194,14 @@ setting has it on), unit tests for the toggles and the tray checkbox, the
 toolbar rendered and looked at, and a tone recorded through the Flatpak.
 
 **4. Smart balance (proposed).** Keeping a voice intelligible over the
-desktop's sound, from the voice-over-music rules below. Its spike is done
-but for YAMNet's accuracy and cost (#42). Order of work it suggests:
+desktop's sound, from the voice-over-music rules below. Its spike is done.
+Order of work it suggests:
 a watchdog on ffmpeg finishing (protects every recording, not just this
 phase); `duck` (voice clean-up with level matching, sidechain ducking);
 then `smart` (voice gate, leakage check, SII report, at-stop re-mix for
-loud beds); the dynamic EQ and the background classifier last, if at
-all.
+loud beds); the dynamic EQ last, if at all. The background classifier
+(YAMNet) isn't worth building: the 20 dB default stays (see the spike
+list).
 
 ## Smart balance (phase 4)
 
@@ -328,6 +329,16 @@ Spike:
   equal level) only if it keeps the voice's loudness.
 - Done (same document): the leakage check, which works in the pauses (see
   *Leakage* above).
+- Done (2026-11-02, by the superagent, #43,
+  [audio-phase4-yamnet.md](audio-phase4-yamnet.md)): YAMNet through
+  tract. About 0.9 % of a core and a 46 ms load, but 18.9 MiB more binary
+  on top of the 16 MB model, and a clean build going from 2.6 s to 248 s.
+  It finds speech, instrumental music and noise well (97 %, 93 %, 100 %),
+  but only 68 % of music with vocals, the one case that picks the 20 dB
+  target. **Decision:** no background classifier; the safe 20 dB default
+  stays. As a voice check its speech score is strong (AUC 1.00 against
+  music and noise on clean speech, 0.83–0.87 with music under it), so it
+  remains the fallback if the leakage check proves not enough.
 - Found (same document): the dynamic-EQ graph (`acrossover`,
   `sidechaincompress`, `amix`) sometimes hung at end of stream in ffmpeg
   9.0.2, and clipt waits for ffmpeg to finish with no limit, so a
