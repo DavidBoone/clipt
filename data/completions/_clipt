@@ -24,7 +24,7 @@ _clipt() {
     '(-c --clipboard)'{-c,--clipboard}'[copy to the clipboard]'
     '(-g --geometry)'{-g,--geometry}'[crop to "X,Y WxH" in logical pixels]:geometry:'
     '(-d --delay)'{-d,--delay}'[wait before capturing]:seconds:'
-    '(-b --backend)'{-b,--backend}'[force a capture backend]:backend:(ext wlr kwin portal x11)'
+    '(-b --backend)'{-b,--backend}'[force a capture backend]:backend:(ext wlr kwin mutter portal x11)'
     '--cursor[include the pointer]'
     '--fps[recording frame rate]:frame rate:'
     '(-h --help)'{-h,--help}'[show help]'
@@ -72,7 +72,7 @@ _clipt_args() {
       return
       ;;
     -b|--backend)
-      _values 'backend' ext wlr kwin portal x11
+      _values 'backend' ext wlr kwin mutter portal x11
       return
       ;;
     -g|--geometry|-d|--delay|--fps)
