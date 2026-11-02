@@ -137,6 +137,10 @@ set of comparisons rather than a single argmax:
 4. Otherwise the window is music: **music with vocals** when the singing sum
    is over 0.006, else **instrumental music**.
 
+The plan's "speech and singing against music" is split here because the four
+classes need the two voice types separately: the speech sum is compared with
+the music sum, and the singing sum then decides which kind of music it is.
+
 The scores are smoothed causally with a three-window mean (1.44 s) before the
 comparisons. The three-window mean is why a decision takes a window or two to
 settle after a change; the figures below show both the cost and the settled
