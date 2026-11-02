@@ -1,6 +1,6 @@
 pkgbase = clipt-bin
 	pkgdesc = Fast, lightweight screenshot and screen-recording tool for Wayland and X11 (prebuilt binary)
-	pkgver = 0.2.0
+	pkgver = 0.3.0
 	pkgrel = 1
 	url = https://github.com/jasondyck/clipt
 	arch = x86_64
@@ -17,9 +17,9 @@ pkgbase = clipt-bin
 	provides = clipt
 	conflicts = clipt
 	options = !debug
-	source_x86_64 = https://github.com/jasondyck/clipt/releases/download/v0.2.0/clipt-v0.2.0-x86_64-linux.tar.gz
-	sha256sums_x86_64 = bc0733fe86a05efedab6350cc655aa61542e6cfa97a8d2c5aab975132b3d6cfe
-	source_aarch64 = https://github.com/jasondyck/clipt/releases/download/v0.2.0/clipt-v0.2.0-aarch64-linux.tar.gz
-	sha256sums_aarch64 = ef94e5f2a272f2109b690d03ad00add49e99eab056b752935f50c55dfdfcb7ca
+	source_x86_64 = https://github.com/jasondyck/clipt/releases/download/v0.3.0/clipt-v0.3.0-x86_64-linux.tar.gz
+	sha256sums_x86_64 = 0c785d1a1cd74769a8023bb1b001606d16ae41c83dbf2501b69409f389beef97
+	source_aarch64 = https://github.com/jasondyck/clipt/releases/download/v0.3.0/clipt-v0.3.0-aarch64-linux.tar.gz
+	sha256sums_aarch64 = b1224e4dbbde3608762f36e41d1c6c27082b01ee58f5e3468905797280b1c896
 
 pkgname = clipt-bin

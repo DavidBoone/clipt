@@ -1,6 +1,6 @@
 # Maintainer: The clipt contributors
 pkgname=clipt
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc="Fast, lightweight screenshot and screen-recording tool for Wayland and X11"
 arch=('x86_64' 'aarch64')
@@ -15,7 +15,7 @@ optdepends=('xdg-desktop-portal: capture on GNOME'
             'libpipewire: screen recording on KDE and GNOME'
             'noto-fonts: default UI font')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('706047c1f9ac0bd3ffbb51cdcdf276c3df49a87c8fc6cccafa5f947a80451659')
+sha256sums=('d4ee8da734a8b06effa0d68fe6b016230450ef11cfdc4cf01aec228ca7639caf')
 
 prepare() {
   cd "$pkgname-$pkgver"
