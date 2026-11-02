@@ -6,6 +6,12 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `clipt record --audio-balance=duck` (or `record_audio_balance = "duck"`)
+  ducks the other sound under the microphone: the microphone's sound is
+  cleaned up in the mix, and the other sources dip by about 11 dB while the
+  voice speaks. Needs the microphone and at least one other source.
+
 ### Fixed
 - A recording no longer hangs for ever if ffmpeg stalls at the end: after
   30 s without it finishing, clipt kills it and reports the partial file.

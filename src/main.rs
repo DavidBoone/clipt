@@ -56,6 +56,10 @@ OPTIONS:
                           mic, both, or device names from `clipt list sound`,
                           comma-separated, each with an optional :PERCENT
                           volume in the mix, e.g. system:70,mic:120
+        --audio-balance MODE
+                          Duck the other sound under the microphone: off or
+                          duck (default: off; needs the microphone and at
+                          least one other source)
         --separate-audio  Also keep each sound source as its own track
         --no-audio        Record without sound, whatever record_audio says
     -h, --help            Show this help
@@ -74,7 +78,7 @@ EDITOR KEYS:
 Config: ~/.config/clipt/config.toml (save_dir, filename, color, width,
 copy_on_save, notify, backend, cursor, font, video_dir, video_filename,
 record_fps, record_codec, record_format, record_audio,
-record_separate_audio, max_duration).
+record_audio_balance, record_separate_audio, max_duration).
 Recording needs ffmpeg; on KDE and GNOME also PipeWire; with sound, a
 PulseAudio or pipewire-pulse server.
 ";
@@ -97,6 +101,8 @@ struct Args {
     gif: bool,
     /// --audio[=SOURCES] or --no-audio ("none").
     audio: Option<String>,
+    /// --audio-balance=MODE.
+    audio_balance: Option<String>,
     separate_audio: bool,
 }
 
@@ -117,6 +123,7 @@ fn parse_args() -> Result<Args> {
             Long("fps") => a.fps = Some(p.value()?.parse()?),
             Long("gif") => a.gif = true,
             Long("audio") => a.audio = Some(p.optional_value().map(|v| v.string()).transpose()?.unwrap_or_else(|| "system".into())),
+            Long("audio-balance") => a.audio_balance = Some(p.value()?.string()?),
             Long("no-audio") => a.audio = Some("none".into()),
             Long("separate-audio") => a.separate_audio = true,
             Long("stop") => a.stop = true,
@@ -213,10 +220,12 @@ fn run() -> Result<()> {
         }
     }
     let mut audio = Vec::new();
+    let mut balance = record::Balance::default();
     if args.cmd == "record" {
         record::ensure_idle()?;
         // Before the overlay: a bad setting or missing library stops here.
         audio = record::audio::Source::parse(args.audio.as_deref().unwrap_or(&cfg.record_audio))?;
+        balance = record::Balance::parse(args.audio_balance.as_deref().unwrap_or(&cfg.record_audio_balance))?;
         if !audio.is_empty() {
             record::audio::check(&audio)?;
         }
@@ -255,8 +264,17 @@ fn run() -> Result<()> {
             (Some(m), None) => bail!("unknown recording mode '{m}' (screen, region, or -g GEOM)"),
         };
         let separate_audio = args.separate_audio || cfg.record_separate_audio;
-        let opts =
-            record::Options { target, output: args.output.clone(), fps: args.fps, cursor, backend, gif: args.gif, audio, separate_audio };
+        let opts = record::Options {
+            target,
+            output: args.output.clone(),
+            fps: args.fps,
+            cursor,
+            backend,
+            gif: args.gif,
+            audio,
+            separate_audio,
+            balance,
+        };
         return record::run(&cfg, opts);
     }
 

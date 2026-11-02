@@ -19,6 +19,8 @@ mod follow;
 mod indicator;
 mod mkv;
 
+pub use encode::Balance;
+
 use crate::capture::wayland::{Protocol, Wayland};
 use crate::capture::{Backend, LogicalRect, Output, VideoFrame};
 use crate::config::Config;
@@ -85,6 +87,8 @@ pub struct Options {
     pub audio: Vec<audio::Source>,
     /// Also keep each source as its own sound track.
     pub separate_audio: bool,
+    /// Duck the other sources under the microphone, cleaning it up first.
+    pub balance: Balance,
 }
 
 /// Sound queued for the writer beyond this means ffmpeg has stalled.
@@ -389,6 +393,8 @@ pub fn run(cfg: &Config, opts: Options) -> Result<()> {
         volumes: audio.iter().map(|a| a.volume).collect(),
         labels: audio.iter().map(audio::Source::label).collect(),
         separate: opts.separate_audio,
+        voice: audio.iter().position(|a| a.device == audio::Device::Mic),
+        balance: opts.balance,
     });
 
     let lock = Lock::take()?;

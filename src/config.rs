@@ -39,6 +39,8 @@ pub struct Config {
     /// Sound to record: none, system, mic, both, or a list of sources with
     /// volumes, as `--audio` takes it.
     pub record_audio: String,
+    /// Duck the other sound under the microphone: off or duck.
+    pub record_audio_balance: String,
     /// Also keep each sound source as its own track.
     pub record_separate_audio: bool,
     /// A recording stops by itself after this many seconds (0 = no limit).
@@ -64,6 +66,7 @@ impl Default for Config {
             record_codec: "auto".into(),
             record_format: "mp4".into(),
             record_audio: "none".into(),
+            record_audio_balance: "off".into(),
             record_separate_audio: false,
             max_duration: 3600,
         }
