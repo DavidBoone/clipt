@@ -41,6 +41,8 @@ USAGE:
     clipt record --pause / --resume / --toggle-pause
     clipt tray            Sit in the system tray (click: region, right-click: menu)
     clipt update          Update to the latest release (--check: only check)
+    clipt gnome-extension Install the GNOME Shell extension that lets the
+                          overlay highlight windows on GNOME
 
 OPTIONS:
     -o, --output PATH     Write the PNG to PATH ('-' for stdout) instead of the save dir
@@ -204,6 +206,9 @@ fn run() -> Result<()> {
     }
     if args.cmd == "update" {
         return update::cli(args.check);
+    }
+    if args.cmd == "gnome-extension" {
+        return windows::install_gnome_extension();
     }
     if args.cmd == "record" && args.stop {
         return record::stop();
