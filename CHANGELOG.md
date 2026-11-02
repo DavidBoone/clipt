@@ -6,6 +6,11 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- The man page and the shell completions were missing `--gif` and
+  `record_format`, and the man page and README still said X11 and the
+  Flatpak couldn't record.
+
 ## [0.2.0] - 2026-11-01
 
 ### Added

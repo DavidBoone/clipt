@@ -84,7 +84,7 @@ no permission dialog); libpipewire is loaded only when recording there.
 On X11 it reads frames over MIT-SHM, only when the screen changes (DAMAGE).
 Elsewhere it falls back to the ScreenCast portal (`-b portal`), which asks
 once which screen to share. `clipt record window APP` records the topmost
-window with that app id. Recording in the Flatpak is still to come (see
+window with that app id. The Flatpak records too, with its own ffmpeg (see
 [docs/recording-plan.md](docs/recording-plan.md)).
 
 Before you select anything, clipt highlights what a click would take: the

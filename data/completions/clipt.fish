@@ -91,5 +91,6 @@ complete -c clipt -l stop -n '__fish_seen_subcommand_from record' -d 'Stop the r
 complete -c clipt -l pause -n '__fish_seen_subcommand_from record' -d 'Pause the running recording'
 complete -c clipt -l resume -n '__fish_seen_subcommand_from record' -d 'Resume the running recording'
 complete -c clipt -l toggle-pause -n '__fish_seen_subcommand_from record' -d 'Toggle pausing the recording'
+complete -c clipt -l gif -n '__fish_seen_subcommand_from record' -d 'Save the recording as a GIF'
 complete -c clipt -s h -l help -d 'Show help'
 complete -c clipt -s V -l version -d 'Show the version'
