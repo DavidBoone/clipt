@@ -6,6 +6,12 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- A recording no longer hangs for ever if ffmpeg stalls at the end: after
+  30 s without it finishing, clipt kills it and reports the partial file.
+  Making a GIF gives ffmpeg 60 s plus twice the recording's length, then
+  keeps the MP4 and says the GIF failed.
+
 ## [0.3.0] - 2026-11-02
 
 ### Added
