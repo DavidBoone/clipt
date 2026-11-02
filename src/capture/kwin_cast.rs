@@ -90,7 +90,7 @@ pub fn stream(target: Target, cursor: bool, crop: CropFn, sink: Box<dyn FnMut(Vi
     debug(&format!("KWin screencast node {node}"));
     // `conn`, `cast` and `s` stay alive while PipeWire runs: dropping the
     // stream object would end the screencast.
-    let r = super::pipewire::stream(Remote { fd: None, node, linear_dmabuf: false, few_buffers: false }, crop, sink);
+    let r = super::pipewire::stream(Remote { fd: None, node, linear_dmabuf: false, screenshot: false }, crop, sink);
     s.close();
     let _ = conn.flush();
     r

@@ -105,7 +105,7 @@ pub fn stream(kind: Kind, region: Option<LogicalRect>, cursor: bool, sink: Box<d
         (Some(r), Some(pos), Some(size)) => Box::new(move |w, h| Some(crop_in(r, pos, size, (w, h)))),
         _ => Box::new(|_, _| None),
     };
-    let r = super::pipewire::stream(Remote { fd: Some(fd), node: shared.node, linear_dmabuf: false, few_buffers: false }, crop, sink);
+    let r = super::pipewire::stream(Remote { fd: Some(fd), node: shared.node, linear_dmabuf: false, screenshot: false }, crop, sink);
     let close = crate::dbus::Proxy::new(&conn, DEST, session.as_str(), "org.freedesktop.portal.Session");
     let _ = close.and_then(|s| s.call::<_, ()>("Close", &()));
     r

@@ -28,9 +28,11 @@ pub struct Remote {
     pub node: u32,
     /// Offer linear DMA-BUFs ahead of shared memory (screenshots).
     pub linear_dmabuf: bool,
-    /// Ask for the fewest buffers: for a screenshot one frame is read, so
-    /// the compositor needn't allocate its usual eight 4K buffers first.
-    pub few_buffers: bool,
+    /// A screenshot's stream: it asks for the fewest buffers (one frame is
+    /// read, so the compositor needn't allocate its usual eight 4K buffers
+    /// first), and it ends when its session is stopped, so a stream that
+    /// never sent a frame doesn't keep its thread and connection.
+    pub screenshot: bool,
 }
 
 /// The compositor sent a DMA-BUF that couldn't be mapped for reading (not
@@ -347,18 +349,23 @@ struct Ctx {
     height: u32,
     order: Option<PixelOrder>,
     crop: CropFn,
-    few_buffers: bool,
+    screenshot: bool,
     sink: Box<dyn FnMut(VideoFrame) -> bool>,
     error: Option<String>,
     dmabuf_error: Option<std::io::Error>,
 }
 
-unsafe extern "C" fn on_state(data: P, _old: c_int, state: c_int, error: *const c_char) {
+unsafe extern "C" fn on_state(data: P, old: c_int, state: c_int, error: *const c_char) {
     let ctx = unsafe { &mut *(data as *mut Ctx) };
     if state == PW_STREAM_STATE_ERROR || state == PW_STREAM_STATE_UNCONNECTED && ctx.error.is_none() {
         let msg = if error.is_null() { "stream ended".into() } else { unsafe { CStr::from_ptr(error) }.to_string_lossy().into_owned() };
         if state == PW_STREAM_STATE_ERROR {
             ctx.error = Some(msg);
+            unsafe { (ctx.lib.main_loop_quit)(ctx.main_loop) };
+        } else if ctx.screenshot && old != PW_STREAM_STATE_UNCONNECTED {
+            // Its session was stopped (the screenshot has what it waited
+            // for): end the loop, or the thread waits for ever. Recordings
+            // keep their old behaviour.
             unsafe { (ctx.lib.main_loop_quit)(ctx.main_loop) };
         }
     }
@@ -375,7 +382,7 @@ unsafe extern "C" fn on_param(data: P, id: u32, param: *const u8) {
         ctx.width = w;
         ctx.height = h;
         ctx.order = order_of(format);
-        if ctx.few_buffers {
+        if ctx.screenshot {
             // Mutter's minimum: one being read, one being filled.
             let p = buffers(2);
             unsafe { (ctx.lib.stream_update_params)(ctx.stream, [p.as_ptr()].as_ptr(), 1) };
@@ -534,7 +541,7 @@ pub fn stream(remote: Remote, crop: CropFn, sink: Box<dyn FnMut(VideoFrame) -> b
             height: 0,
             order: None,
             crop,
-            few_buffers: remote.few_buffers,
+            screenshot: remote.screenshot,
             sink,
             error: None,
             dmabuf_error: None,
@@ -552,12 +559,13 @@ pub fn stream(remote: Remote, crop: CropFn, sink: Box<dyn FnMut(VideoFrame) -> b
                 Err(anyhow::anyhow!("PipeWire: connecting the stream failed ({r})"))
             } else {
                 (lib.main_loop_run)(main_loop);
-                if let Some(e) = ctx.dmabuf_error.take() {
-                    return Err(DmaBufUnreadable(e).into());
-                }
-                match ctx.error.take() {
-                    Some(e) => Err(anyhow::anyhow!("PipeWire stream: {e}")),
-                    None => Ok(()),
+                // Not returned early: the stream, core, context and loop
+                // below must go, and the listener's `ctx` and `hook` with
+                // them, not before.
+                match (ctx.dmabuf_error.take(), ctx.error.take()) {
+                    (Some(e), _) => Err(DmaBufUnreadable(e).into()),
+                    (None, Some(e)) => Err(anyhow::anyhow!("PipeWire stream: {e}")),
+                    (None, None) => Ok(()),
                 }
             }
         };

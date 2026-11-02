@@ -192,6 +192,9 @@ impl Capturer {
         }
         let mut errors = Vec::new();
         let all = self.outputs();
+        // Set when the portal fails filling in for Mutter (a PipeWire build).
+        #[cfg_attr(not(feature = "pipewire"), allow(unused_mut))]
+        let mut portal_failed = false;
         for b in order {
             let r = match (b, &mut self.display) {
                 (Backend::Ext, Display::Wayland(wl)) => wl.capture(outputs, cursor, wayland::Protocol::ExtImageCopy),
@@ -204,11 +207,16 @@ impl Capturer {
                     None => Err(anyhow::anyhow!("no session bus")),
                 },
                 #[cfg(feature = "pipewire")]
-                (Backend::Mutter, _) => {
-                    mutter_cast::capture(outputs, cursor).and_then(|shots| portal_for_missing(self.bus.as_ref(), &all, outputs, shots))
-                }
+                (Backend::Mutter, _) => match &self.bus {
+                    Some(bus) => mutter_cast::capture(bus, outputs, cursor)
+                        .and_then(|shots| portal_for_missing(bus, &all, outputs, shots).inspect_err(|_| portal_failed = true)),
+                    None => Err(anyhow::anyhow!("no session bus")),
+                },
                 #[cfg(not(feature = "pipewire"))]
                 (Backend::Mutter, _) => Err(anyhow::anyhow!("this clipt was built without PipeWire")),
+                // It just failed filling in for Mutter; asking again would
+                // only wait as long again.
+                (Backend::Portal, _) if portal_failed => continue,
                 (Backend::Portal, _) => match &self.bus {
                     Some(bus) => portal::capture(bus, &all, outputs),
                     None => Err(anyhow::anyhow!("no session bus")),
@@ -231,12 +239,7 @@ impl Capturer {
 /// Mutter's shots, with any monitor it sent nothing for (see
 /// `mutter_cast::capture`) taken from the screenshot portal instead.
 #[cfg(feature = "pipewire")]
-fn portal_for_missing(
-    bus: Option<&crate::dbus::Connection>,
-    all: &[Output],
-    outputs: &[Output],
-    shots: Vec<Option<Shot>>,
-) -> Result<Vec<Shot>> {
+fn portal_for_missing(bus: &crate::dbus::Connection, all: &[Output], outputs: &[Output], shots: Vec<Option<Shot>>) -> Result<Vec<Shot>> {
     use anyhow::Context;
     let missing: Vec<Output> = outputs.iter().zip(&shots).filter(|(_, s)| s.is_none()).map(|(o, _)| o.clone()).collect();
     if missing.is_empty() {
@@ -246,7 +249,6 @@ fn portal_for_missing(
         let names: Vec<_> = missing.iter().map(|o| o.name.as_str()).collect();
         eprintln!("clipt: no frame from Mutter for {}; asking the portal", names.join(", "));
     }
-    let bus = bus.context("Mutter sent no frame, and there's no session bus for the portal")?;
     let mut rest = portal::capture(bus, all, &missing)?.into_iter();
     shots.into_iter().map(|s| s.or_else(|| rest.next())).collect::<Option<Vec<_>>>().context("the portal returned too few monitors")
 }

@@ -33,7 +33,7 @@ pub fn available(conn: &crate::dbus::Connection) -> bool {
 pub fn stream(target: Target, cursor: bool, crop: CropFn, sink: Box<dyn FnMut(VideoFrame) -> bool>) -> Result<()> {
     let conn = crate::dbus::session().context("connecting to the session bus")?;
     let (session, node) = start(&conn, &target, cursor)?;
-    let r = super::pipewire::stream(Remote { fd: None, node, linear_dmabuf: false, few_buffers: false }, crop, sink);
+    let r = super::pipewire::stream(Remote { fd: None, node, linear_dmabuf: false, screenshot: false }, crop, sink);
     stop(&conn, &session);
     r
 }
@@ -122,19 +122,17 @@ const SHOT_TIMEOUT: Duration = Duration::from_millis(500);
 /// it scans out directly isn't painted, so one could send nothing until its
 /// content changed. A monitor that still sends nothing in time comes back
 /// as `None`, for the caller to take from somewhere else.
-pub fn capture(outputs: &[Output], cursor: bool) -> Result<Vec<Option<Shot>>> {
+pub fn capture(conn: &crate::dbus::Connection, outputs: &[Output], cursor: bool) -> Result<Vec<Option<Shot>>> {
     super::pipewire::check()?;
     let t0 = Instant::now();
-    let conn = crate::dbus::session().context("connecting to the session bus")?;
     let sessions: Sessions = Arc::new(Mutex::new(Some(Vec::with_capacity(outputs.len()))));
-    let frames = first_frames(&conn, outputs, cursor, &sessions);
+    let frames = first_frames(conn, outputs, cursor, &sessions);
     // Stopping the sessions ends any stream still waiting for a frame, so
     // GNOME doesn't go on showing the screen as shared.
     let started = sessions.lock().unwrap().take().unwrap_or_default();
     for s in &started {
-        stop(&conn, s);
+        stop(conn, s);
     }
-    let frames = frames?;
     let got = frames.iter().filter(|f| f.is_some()).count();
     debug(&format!("Mutter frames for {got} of {} monitors in {:.1} ms", outputs.len(), t0.elapsed().as_secs_f64() * 1e3));
     Ok(outputs.iter().zip(frames).map(|(o, f)| f.map(|f| shot(o, f))).collect())
@@ -143,27 +141,40 @@ pub fn capture(outputs: &[Output], cursor: bool) -> Result<Vec<Option<Shot>>> {
 /// Start a stream per output (recording each session in `sessions`), all
 /// before waiting on any, and wait up to `SHOT_TIMEOUT` for their first
 /// frames.
-fn first_frames(conn: &crate::dbus::Connection, outputs: &[Output], cursor: bool, sessions: &Sessions) -> Result<Vec<Option<VideoFrame>>> {
+fn first_frames(conn: &crate::dbus::Connection, outputs: &[Output], cursor: bool, sessions: &Sessions) -> Vec<Option<VideoFrame>> {
+    // A monitor Mutter won't start is left for the caller to take elsewhere,
+    // like one that sends nothing; the others are still worth having.
     let mut starting = Vec::with_capacity(outputs.len());
-    for o in outputs {
-        let s = begin(conn, &Target::Monitor(o.name.clone()), cursor).with_context(|| format!("capturing {}", o.name))?;
-        track(conn, sessions, &s.session);
-        starting.push(s);
+    for (i, o) in outputs.iter().enumerate() {
+        match begin(conn, &Target::Monitor(o.name.clone()), cursor) {
+            Ok(s) => {
+                track(conn, sessions, &s.session);
+                starting.push((i, s));
+            }
+            Err(e) => debug(&format!("{}: {e:#}", o.name)),
+        }
     }
     let (tx, rx) = mpsc::channel();
-    for (i, (o, s)) in outputs.iter().zip(starting).enumerate() {
-        let node = s.node().with_context(|| format!("capturing {}", o.name))?;
-        let (tx, conn, sessions, name) = (tx.clone(), conn.clone(), sessions.clone(), o.name.clone());
-        // Detached, not scoped: a stream that never delivers must not hold
+    for (i, s) in starting {
+        let (tx, conn, sessions, name) = (tx.clone(), conn.clone(), sessions.clone(), outputs[i].name.clone());
+        // Detached, not scoped: a stream that never delivers, or a node
+        // never announced (signals have no D-Bus timeout), must not hold
         // the screenshot up past the timeout.
         std::thread::spawn(move || {
+            let node = match s.node() {
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = tx.send((i, Err(e)));
+                    return;
+                }
+            };
             let read = |node, linear_dmabuf| {
                 let first = tx.clone();
                 let sink = Box::new(move |f: VideoFrame| {
                     let _ = first.send((i, Ok(f)));
                     false
                 });
-                super::pipewire::stream(Remote { fd: None, node, linear_dmabuf, few_buffers: true }, Box::new(|_, _| None), sink)
+                super::pipewire::stream(Remote { fd: None, node, linear_dmabuf, screenshot: true }, Box::new(|_, _| None), sink)
             };
             let mut r = read(node, true);
             if r.as_ref().is_err_and(|e| e.is::<DmaBufUnreadable>()) {
@@ -182,17 +193,23 @@ fn first_frames(conn: &crate::dbus::Connection, outputs: &[Output], cursor: bool
     let deadline = Instant::now() + SHOT_TIMEOUT;
     let mut frames: Vec<Option<VideoFrame>> = outputs.iter().map(|_| None).collect();
     // A monitor whose stream fails is left to the caller, like one that
-    // times out; the others are still worth having.
-    let mut waiting = outputs.len();
-    while waiting > 0 {
+    // times out. Counted by monitor, not by message: one can send a frame
+    // and then an error.
+    let mut heard = vec![false; outputs.len()];
+    while heard.iter().any(|h| !h) {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok((i, Ok(f))) => frames[i] = Some(f),
-            Ok((i, Err(e))) => debug(&format!("{}: {e:#}", outputs[i].name)),
+            Ok((i, r)) => {
+                match r {
+                    Ok(f) => frames[i] = Some(f),
+                    Err(e) => debug(&format!("{}: {e:#}", outputs[i].name)),
+                }
+                heard[i] = true;
+            }
+            // Timed out, or every thread has finished.
             Err(_) => break,
         }
-        waiting -= 1;
     }
-    Ok(frames)
+    frames
 }
 
 /// A frame as a screenshot of `o`, at the monitor's native size. Mutter
