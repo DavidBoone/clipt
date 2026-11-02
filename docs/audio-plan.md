@@ -194,8 +194,13 @@ setting has it on), unit tests for the toggles and the tray checkbox, the
 toolbar rendered and looked at, and a tone recorded through the Flatpak.
 
 **4. Smart balance (proposed).** Keeping a voice intelligible over the
-desktop's sound, from the voice-over-music rules below. Starts with a
-spike, part done (voice detection, YAMNet licence).
+desktop's sound, from the voice-over-music rules below. Its spike is done
+but for YAMNet's accuracy and cost (#42). Order of work it suggests:
+a watchdog on ffmpeg finishing (protects every recording, not just this
+phase); `duck` (voice clean-up with level matching, sidechain ducking);
+then `smart` (voice gate, leakage check, SII report, at-stop re-mix for
+loud beds); the dynamic EQ and the background classifier last, if at
+all.
 
 ## Smart balance (phase 4)
 
@@ -259,10 +264,13 @@ is needed either):
   clean; *Leakage* decides whether it is.
 - **Leakage: does the voice source hear the other sources?** clipt has
   both streams, so it can tell: correlate the voice source against each
-  other source over a few seconds, at lags up to ~200 ms (the speakers'
-  and room's delay). The same music in both means the microphone hears
-  the speakers. Cheap (a few seconds of decimated audio, every few
-  seconds). With leakage, `smart` says so at stop ("the microphone hears
+  other source at lags up to ~250 ms (the speakers' and room's delay),
+  in the voice source's pauses. Measured ([audio-phase4-spike.md](audio-phase4-spike.md)):
+  over whole windows the voice swamps the leak, but in the quietest
+  second-long windows a leak even 40 dB under the voice correlates at
+  0.45–0.79 while controls stay at or below 0.19, so "a quiet second
+  above about 0.3" detects it. Cheap: one FFT pair per quiet second at
+  8 kHz. Without enough pauses, it says it couldn't check. With leakage, `smart` says so at stop ("the microphone hears
   the speakers; headphones give a reliable result") and falls back to the
   broadband rules rather than report an SII it can't trust. YAMNet's
   speech score on the voice source is the stronger second discriminator,
@@ -310,13 +318,20 @@ Spike:
 - Done (2026-11-02, by the superagent, PR #36): nnnoiseless as voice
   detection, and the YAMNet weights' licence. Findings above and in
   [audio-phase4-research.md](audio-phase4-research.md).
-- To do: a recording of speech over music, mixed plain, ducked, and
-  ducked with the dynamic EQ; SII at the 10th percentile for each, against
-  the targets and the rules of thumb. It decides whether the at-stop fix
-  is needed or ducking alone gets there, and settles the ducking settings.
-- To do: the leakage check, on the research's speech-over-music mixes
-  (−10 and −20 dB) against clean speech: does correlation tell them apart,
-  and how much of each source does it need?
+- Done (2026-11-02, [audio-phase4-spike.md](audio-phase4-spike.md)):
+  SII with the bed plain, ducked and ducked with the dynamic EQ. The rules
+  of thumb hold (plain: 0.75 at about 15 dB under, more with vocals);
+  ducking by about 11 dB (`sidechaincompress`, threshold 0.02, ratio 8,
+  attack 20 ms, release 300 ms) reaches 0.75 with the bed only 10 dB
+  under; the dynamic EQ adds 0.03–0.09; only beds within ~5 dB of the
+  voice need the at-stop re-mix; the voice clean-up helps (+0.05–0.07 at
+  equal level) only if it keeps the voice's loudness.
+- Done (same document): the leakage check, which works in the pauses (see
+  *Leakage* above).
+- Found (same document): the dynamic-EQ graph (`acrossover`,
+  `sidechaincompress`, `amix`) sometimes hung at end of stream in ffmpeg
+  9.0.2, and clipt waits for ffmpeg to finish with no limit, so a
+  watchdog comes first.
 - To do: YAMNet through tract on music with and without vocals, and on
   noise: how often it's right after smoothing, CPU per window, the binary
   size it adds and its load time. It decides whether the model earns its
