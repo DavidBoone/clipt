@@ -23,14 +23,14 @@ numbered counters, a highlighter, text and the toolbar](docs/screenshot.png)
 | Desktop | Capture | Overlay | Tested in CI |
 |---|---|---|---|
 | KDE Plasma | KWin ScreenShot2 | layer-shell | by hand (no headless KWin) |
-| GNOME | xdg-desktop-portal | fullscreen window | GNOME Shell 51, 1 and 2 monitors |
+| GNOME | Mutter ScreenCast (screenshot portal as fallback) | fullscreen window | GNOME Shell 51, 1 and 2 monitors |
 | Sway | ext-image-copy-capture / wlr-screencopy | layer-shell | Sway 1.12, 4 layouts incl. mixed DPI, rotation |
 | niri | wlr-screencopy | layer-shell | yes |
 | labwc | ext-image-copy-capture / wlr-screencopy | layer-shell | yes |
 | Hyprland, river, Wayfire, COSMIC | ext-image-copy-capture / wlr-screencopy | layer-shell | same protocols as above; no headless CI run |
 | X11: Xfce, Cinnamon, MATE, LXQt, i3, Openbox, … | GetImage (RandR/Xinerama monitors) | override-redirect windows, MIT-SHM | Xvfb + headless Xorg under Openbox, 1 and 3 monitors |
 
-The capture backend is picked automatically (override with `-b ext|wlr|kwin|portal|x11`
+The capture backend is picked automatically (override with `-b ext|wlr|kwin|mutter|portal|x11`
 or `backend =` in the config). On X11 the clipboard supports INCR, so large
 PNGs paste correctly into any application, and compositor users can exclude
 the overlay by its `WM_CLASS`, `clipt`.
@@ -140,7 +140,7 @@ color = 1            # 1-8: red orange yellow green blue purple white black
 width = 4
 copy_on_save = true
 notify = true
-backend = "auto"     # ext, wlr, kwin, portal
+backend = "auto"     # ext, wlr, kwin, mutter, portal
 cursor = false
 # font = "/usr/share/fonts/TTF/Inter-Regular.ttf"
 check_updates = false   # `clipt tray` checks GitHub daily for a new release
@@ -172,10 +172,12 @@ On KDE the desktop entry carries `X-KDE-DBUS-Restricted-Interfaces` so KWin
 lets clipt capture silently. Bind `clipt` to Print in System Settings →
 Shortcuts.
 
-**GNOME:** captures go through the screenshot portal, which needs the desktop
-entry (clipt registers its app ID from it, and GLib ignores entries whose
-`Exec` doesn't resolve) plus a one-time permission. If you aren't prompted,
-grant it directly:
+**GNOME:** captures come from Mutter's ScreenCast, one frame per monitor at
+its own resolution, with no dialog and no flash. If a monitor sends nothing
+within half a second, clipt takes that one from the screenshot portal
+instead. The portal needs the desktop entry (clipt registers its app ID
+from it, and GLib ignores entries whose `Exec` doesn't resolve) plus a
+one-time permission. If you aren't prompted, grant it directly:
 
 ```
 gdbus call --session --dest org.freedesktop.impl.portal.PermissionStore \

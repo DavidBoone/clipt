@@ -8,9 +8,12 @@
 //! the dozen functions used here, and a minimal SPA pod encoder/parser for
 //! the format negotiation (the pod layout is PipeWire's stable wire format).
 //!
-//! Only shared-memory buffers are asked for (no DMA-BUF modifiers are
+//! Recordings ask only for shared-memory buffers (no DMA-BUF modifiers are
 //! offered), so frames can be read directly and copied out like the
 //! wlroots ones; compositors fall back to memfd buffers for that.
+//! Screenshots also offer linear DMA-BUFs, mapped and read on the CPU: Mutter
+//! fills shared memory only after painting a monitor, which one it scans out
+//! directly may not do for seconds, while it copies a DMA-BUF either way.
 
 use super::{PixelOrder, VideoFrame};
 use anyhow::{Result, bail};
@@ -23,7 +26,28 @@ use std::sync::OnceLock;
 pub struct Remote {
     pub fd: Option<OwnedFd>,
     pub node: u32,
+    /// Offer linear DMA-BUFs ahead of shared memory (screenshots).
+    pub linear_dmabuf: bool,
+    /// A screenshot's stream: it asks for the fewest buffers (one frame is
+    /// read, so the compositor needn't allocate its usual eight 4K buffers
+    /// first), and it ends when its session is stopped, so a stream that
+    /// never sent a frame doesn't keep its thread and connection.
+    pub screenshot: bool,
 }
+
+/// The compositor sent a DMA-BUF that couldn't be mapped for reading (not
+/// every driver allows it): connecting again without `linear_dmabuf` gets
+/// shared memory instead.
+#[derive(Debug)]
+pub struct DmaBufUnreadable(pub std::io::Error);
+
+impl std::fmt::Display for DmaBufUnreadable {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "couldn't map the compositor's DMA-BUF: {}", self.0)
+    }
+}
+
+impl std::error::Error for DmaBufUnreadable {}
 
 /// A crop in buffer pixels for a frame of the given size.
 pub type CropFn = Box<dyn Fn(u32, u32) -> Option<(u32, u32, u32, u32)>>;
@@ -50,6 +74,7 @@ struct Lib {
     stream_connect: unsafe extern "C" fn(P, u32, u32, u32, *const *const u8, u32) -> c_int,
     stream_dequeue_buffer: unsafe extern "C" fn(P) -> *mut PwBuffer,
     stream_queue_buffer: unsafe extern "C" fn(P, *mut PwBuffer) -> c_int,
+    stream_update_params: unsafe extern "C" fn(P, *const *const u8, u32) -> c_int,
     stream_destroy: unsafe extern "C" fn(P),
 }
 
@@ -101,6 +126,7 @@ fn load() -> Result<Lib, String> {
         stream_connect: sym!("pw_stream_connect"),
         stream_dequeue_buffer: sym!("pw_stream_dequeue_buffer"),
         stream_queue_buffer: sym!("pw_stream_queue_buffer"),
+        stream_update_params: sym!("pw_stream_update_params"),
         stream_destroy: sym!("pw_stream_destroy"),
     })
 }
@@ -175,18 +201,31 @@ const PW_STREAM_FLAG_MAP_BUFFERS: u32 = 1 << 2;
 const SPA_DIRECTION_INPUT: u32 = 0;
 const SPA_PARAM_ENUM_FORMAT: u32 = 3;
 const SPA_PARAM_FORMAT: u32 = 4;
+const SPA_PARAM_BUFFERS: u32 = 5;
+const SPA_PARAM_BUFFERS_BUFFERS: u32 = 1;
+const SPA_DATA_DMABUF: u32 = 3;
+const SPA_POD_PROP_FLAG_MANDATORY: u32 = 1 << 3;
+const DRM_FORMAT_MOD_LINEAR: u64 = 0;
+// _IOW('b', 0, struct dma_buf_sync), and its flags
+const DMA_BUF_IOCTL_SYNC: u64 = 0x4008_6200;
+const DMA_BUF_SYNC_READ: u64 = 1;
+const DMA_BUF_SYNC_END: u64 = 4;
 
 // ---- SPA pods ----------------------------------------------------------------
 
 const SPA_TYPE_ID: u32 = 3;
+const SPA_TYPE_INT: u32 = 4;
+const SPA_TYPE_LONG: u32 = 5;
 const SPA_TYPE_RECTANGLE: u32 = 10;
 const SPA_TYPE_FRACTION: u32 = 11;
 const SPA_TYPE_OBJECT: u32 = 15;
 const SPA_TYPE_CHOICE: u32 = 19;
 const SPA_TYPE_OBJECT_FORMAT: u32 = 0x40003;
+const SPA_TYPE_OBJECT_PARAM_BUFFERS: u32 = 0x40004;
 const SPA_FORMAT_MEDIA_TYPE: u32 = 1;
 const SPA_FORMAT_MEDIA_SUBTYPE: u32 = 2;
 const SPA_FORMAT_VIDEO_FORMAT: u32 = 0x20001;
+const SPA_FORMAT_VIDEO_MODIFIER: u32 = 0x20002;
 const SPA_FORMAT_VIDEO_SIZE: u32 = 0x20003;
 const SPA_FORMAT_VIDEO_FRAMERATE: u32 = 0x20004;
 const SPA_MEDIA_TYPE_VIDEO: u32 = 2;
@@ -233,9 +272,10 @@ fn choice(kind: u32, child_type: u32, child_size: u32, values: &[u32]) -> Vec<u8
     pod(SPA_TYPE_CHOICE, &body)
 }
 
-/// The EnumFormat we offer: raw video, 32-bit RGB in either byte order,
-/// any size and frame rate.
-pub(crate) fn enum_format() -> Vec<u8> {
+/// An EnumFormat we offer: raw video, 32-bit RGB in either byte order, any
+/// size and frame rate; with `linear`, only as linear DMA-BUFs (the modifier
+/// is mandatory, so a producer that can't do that skips this format).
+pub(crate) fn enum_format(linear: bool) -> Vec<u8> {
     let prop = |key: u32, value: Vec<u8>| {
         let mut v = u32s(&[key, 0]);
         v.extend(value);
@@ -250,6 +290,22 @@ pub(crate) fn enum_format() -> Vec<u8> {
     ));
     body.extend(prop(SPA_FORMAT_VIDEO_SIZE, choice(SPA_CHOICE_RANGE, SPA_TYPE_RECTANGLE, 8, &[1920, 1080, 1, 1, 16384, 16384])));
     body.extend(prop(SPA_FORMAT_VIDEO_FRAMERATE, choice(SPA_CHOICE_RANGE, SPA_TYPE_FRACTION, 8, &[60, 1, 0, 1, 1000, 1])));
+    if linear {
+        // An Enum Choice of one Long: the default, then the same as the only
+        // alternative.
+        let mut modifier = u32s(&[SPA_CHOICE_ENUM, 0, 8, SPA_TYPE_LONG]);
+        modifier.extend(DRM_FORMAT_MOD_LINEAR.to_ne_bytes());
+        modifier.extend(DRM_FORMAT_MOD_LINEAR.to_ne_bytes());
+        body.extend(u32s(&[SPA_FORMAT_VIDEO_MODIFIER, SPA_POD_PROP_FLAG_MANDATORY]));
+        body.extend(pod(SPA_TYPE_CHOICE, &modifier));
+    }
+    pod(SPA_TYPE_OBJECT, &body)
+}
+
+/// A Buffers param asking for `n` buffers; the rest is left to the producer.
+pub(crate) fn buffers(n: u32) -> Vec<u8> {
+    let mut body = u32s(&[SPA_TYPE_OBJECT_PARAM_BUFFERS, SPA_PARAM_BUFFERS, SPA_PARAM_BUFFERS_BUFFERS, 0]);
+    body.extend(pod(SPA_TYPE_INT, &u32s(&[n])));
     pod(SPA_TYPE_OBJECT, &body)
 }
 
@@ -293,16 +349,23 @@ struct Ctx {
     height: u32,
     order: Option<PixelOrder>,
     crop: CropFn,
+    screenshot: bool,
     sink: Box<dyn FnMut(VideoFrame) -> bool>,
     error: Option<String>,
+    dmabuf_error: Option<std::io::Error>,
 }
 
-unsafe extern "C" fn on_state(data: P, _old: c_int, state: c_int, error: *const c_char) {
+unsafe extern "C" fn on_state(data: P, old: c_int, state: c_int, error: *const c_char) {
     let ctx = unsafe { &mut *(data as *mut Ctx) };
     if state == PW_STREAM_STATE_ERROR || state == PW_STREAM_STATE_UNCONNECTED && ctx.error.is_none() {
         let msg = if error.is_null() { "stream ended".into() } else { unsafe { CStr::from_ptr(error) }.to_string_lossy().into_owned() };
         if state == PW_STREAM_STATE_ERROR {
             ctx.error = Some(msg);
+            unsafe { (ctx.lib.main_loop_quit)(ctx.main_loop) };
+        } else if ctx.screenshot && old != PW_STREAM_STATE_UNCONNECTED {
+            // Its session was stopped (the screenshot has what it waited
+            // for): end the loop, or the thread waits for ever. Recordings
+            // keep their old behaviour.
             unsafe { (ctx.lib.main_loop_quit)(ctx.main_loop) };
         }
     }
@@ -319,6 +382,11 @@ unsafe extern "C" fn on_param(data: P, id: u32, param: *const u8) {
         ctx.width = w;
         ctx.height = h;
         ctx.order = order_of(format);
+        if ctx.screenshot {
+            // Mutter's minimum: one being read, one being filled.
+            let p = buffers(2);
+            unsafe { (ctx.lib.stream_update_params)(ctx.stream, [p.as_ptr()].as_ptr(), 1) };
+        }
         debug(&format!("PipeWire format {format} {w}x{h}"));
     }
 }
@@ -344,21 +412,36 @@ unsafe fn read_frame(ctx: &mut Ctx, b: &PwBuffer) -> bool {
         return true;
     }
     let d = unsafe { &*sb.datas };
-    if d.data.is_null() || d.chunk.is_null() {
-        if ctx.error.is_none() {
-            ctx.error = Some("the compositor sent a buffer clipt can't read (DMA-BUF)".into());
-        }
-        return false;
+    if d.chunk.is_null() {
+        return true;
     }
     let chunk = unsafe { &*d.chunk };
     // An empty chunk carries no new picture (a cursor-only update).
     if chunk.size == 0 {
         return true;
     }
+    let map = if d.kind == SPA_DATA_DMABUF {
+        match DmaBufMap::new(d) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                ctx.dmabuf_error = Some(e);
+                return false;
+            }
+        }
+    } else {
+        None
+    };
+    let data = map.as_ref().map_or(d.data, |m| m.data);
+    if data.is_null() {
+        if ctx.error.is_none() {
+            ctx.error = Some("the compositor sent a buffer clipt can't read (DMA-BUF)".into());
+        }
+        return false;
+    }
     let (w, h) = (ctx.width, ctx.height);
     let stride = if chunk.stride > 0 { chunk.stride as usize } else { w as usize * 4 };
     let avail = (d.maxsize as usize).saturating_sub(chunk.offset as usize);
-    let pixels = unsafe { std::slice::from_raw_parts(d.data.add(chunk.offset as usize), avail) };
+    let pixels = unsafe { std::slice::from_raw_parts(data.add(chunk.offset as usize), avail) };
     let (x, y, cw, ch) = (ctx.crop)(w, h).unwrap_or((0, 0, w, h));
     let row = cw as usize * 4;
     let mut out = Vec::with_capacity(row * ch as usize);
@@ -371,6 +454,44 @@ unsafe fn read_frame(ctx: &mut Ctx, b: &PwBuffer) -> bool {
         out.extend_from_slice(line);
     }
     (ctx.sink)(VideoFrame { width: cw, height: ch, order, data: out })
+}
+
+/// A DMA-BUF mapped for reading, between the sync calls that make the
+/// GPU's writes visible to the CPU (and wait for them to finish).
+struct DmaBufMap {
+    fd: c_int,
+    base: *mut c_void,
+    len: usize,
+    /// The buffer's data, `mapoffset` into the mapping.
+    data: *mut u8,
+}
+
+impl DmaBufMap {
+    fn new(d: &SpaData) -> std::io::Result<Self> {
+        let fd = d.fd as c_int;
+        let len = d.mapoffset as usize + d.maxsize as usize;
+        let base = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, fd, 0) };
+        if base == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error());
+        }
+        let map = Self { fd, base, len, data: unsafe { base.cast::<u8>().add(d.mapoffset as usize) } };
+        map.sync(DMA_BUF_SYNC_READ)?;
+        Ok(map)
+    }
+
+    fn sync(&self, flags: u64) -> std::io::Result<()> {
+        if unsafe { libc::ioctl(self.fd, DMA_BUF_IOCTL_SYNC as _, &flags) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+impl Drop for DmaBufMap {
+    fn drop(&mut self) {
+        let _ = self.sync(DMA_BUF_SYNC_READ | DMA_BUF_SYNC_END);
+        unsafe { libc::munmap(self.base, self.len) };
+    }
 }
 
 static EVENTS: StreamEvents = StreamEvents {
@@ -412,23 +533,39 @@ pub fn stream(remote: Remote, crop: CropFn, sink: Box<dyn FnMut(VideoFrame) -> b
         }
         let props = CString::new("{ media.type = Video media.category = Capture media.role = Screen }").unwrap();
         let stream = (lib.stream_new)(core, c"clipt".as_ptr(), (lib.properties_new_string)(props.as_ptr()));
-        let mut ctx = Box::new(Ctx { lib, main_loop, stream, width: 0, height: 0, order: None, crop, sink, error: None });
+        let mut ctx = Box::new(Ctx {
+            lib,
+            main_loop,
+            stream,
+            width: 0,
+            height: 0,
+            order: None,
+            crop,
+            screenshot: remote.screenshot,
+            sink,
+            error: None,
+            dmabuf_error: None,
+        });
         let mut hook = Box::new(SpaHook([0; 6]));
         let result = if stream.is_null() {
             Err(anyhow::anyhow!("PipeWire: couldn't create the stream"))
         } else {
             (lib.stream_add_listener)(stream, &mut *hook, &EVENTS, &mut *ctx as *mut Ctx as P);
-            let params = enum_format();
-            let list = [params.as_ptr()];
+            let (linear, shm) = (enum_format(true), enum_format(false));
+            let list: Vec<*const u8> = if remote.linear_dmabuf { vec![linear.as_ptr(), shm.as_ptr()] } else { vec![shm.as_ptr()] };
             let flags = PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS;
-            let r = (lib.stream_connect)(stream, SPA_DIRECTION_INPUT, remote.node, flags, list.as_ptr(), 1);
+            let r = (lib.stream_connect)(stream, SPA_DIRECTION_INPUT, remote.node, flags, list.as_ptr(), list.len() as u32);
             if r < 0 {
                 Err(anyhow::anyhow!("PipeWire: connecting the stream failed ({r})"))
             } else {
                 (lib.main_loop_run)(main_loop);
-                match ctx.error.take() {
-                    Some(e) => Err(anyhow::anyhow!("PipeWire stream: {e}")),
-                    None => Ok(()),
+                // Not returned early: the stream, core, context and loop
+                // below must go, and the listener's `ctx` and `hook` with
+                // them, not before.
+                match (ctx.dmabuf_error.take(), ctx.error.take()) {
+                    (Some(e), _) => Err(DmaBufUnreadable(e).into()),
+                    (None, Some(e)) => Err(anyhow::anyhow!("PipeWire stream: {e}")),
+                    (None, None) => Ok(()),
                 }
             }
         };
@@ -455,13 +592,29 @@ mod tests {
 
     #[test]
     fn enum_format_is_a_well_formed_object() {
-        let p = enum_format();
-        assert_eq!(p.len() % 8, 0);
-        let size = u32::from_ne_bytes(p[0..4].try_into().unwrap()) as usize;
-        assert_eq!(size + 8, p.len(), "object size covers its padded properties");
-        assert_eq!(u32::from_ne_bytes(p[4..8].try_into().unwrap()), SPA_TYPE_OBJECT);
-        assert_eq!(u32::from_ne_bytes(p[8..12].try_into().unwrap()), SPA_TYPE_OBJECT_FORMAT);
-        assert_eq!(u32::from_ne_bytes(p[12..16].try_into().unwrap()), SPA_PARAM_ENUM_FORMAT);
+        for p in [enum_format(false), enum_format(true)] {
+            assert_eq!(p.len() % 8, 0);
+            let size = u32::from_ne_bytes(p[0..4].try_into().unwrap()) as usize;
+            assert_eq!(size + 8, p.len(), "object size covers its padded properties");
+            assert_eq!(u32::from_ne_bytes(p[4..8].try_into().unwrap()), SPA_TYPE_OBJECT);
+            assert_eq!(u32::from_ne_bytes(p[8..12].try_into().unwrap()), SPA_TYPE_OBJECT_FORMAT);
+            assert_eq!(u32::from_ne_bytes(p[12..16].try_into().unwrap()), SPA_PARAM_ENUM_FORMAT);
+        }
+    }
+
+    #[test]
+    fn screenshot_params_are_well_formed() {
+        let linear = enum_format(true);
+        let size = u32::from_ne_bytes(linear[0..4].try_into().unwrap()) as usize;
+        assert_eq!(size + 8, linear.len());
+        let key = u32s(&[SPA_FORMAT_VIDEO_MODIFIER, SPA_POD_PROP_FLAG_MANDATORY]);
+        assert!(linear.windows(8).any(|w| w == key), "the modifier is offered, and mandatory");
+        assert!(!enum_format(false).windows(4).any(|w| w == SPA_FORMAT_VIDEO_MODIFIER.to_ne_bytes()));
+        let b = buffers(2);
+        assert_eq!(b.len() % 8, 0);
+        assert_eq!(u32::from_ne_bytes(b[8..12].try_into().unwrap()), SPA_TYPE_OBJECT_PARAM_BUFFERS);
+        assert_eq!(&b[16..32], &u32s(&[SPA_PARAM_BUFFERS_BUFFERS, 0, 4, SPA_TYPE_INT])[..]);
+        assert_eq!(u32::from_ne_bytes(b[32..36].try_into().unwrap()), 2);
     }
 
     #[test]
@@ -482,6 +635,6 @@ mod tests {
         assert_eq!(parse_format(&p), Some((VIDEO_RGBX, 3840, 2160)));
         assert_eq!(order_of(VIDEO_RGBX), Some(PixelOrder::Rgbx));
         // our own EnumFormat has no fixed size/format: not a negotiated format
-        assert_eq!(parse_format(&enum_format()), Some((VIDEO_BGRX, 1920, 1080)), "first Choice value read as the default");
+        assert_eq!(parse_format(&enum_format(false)), Some((VIDEO_BGRX, 1920, 1080)), "first Choice value read as the default");
     }
 }

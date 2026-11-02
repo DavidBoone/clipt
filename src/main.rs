@@ -48,7 +48,7 @@ OPTIONS:
     -c, --clipboard       Copy to the clipboard (full/screen)
     -g, --geometry GEOM   Crop to \"X,Y WxH\" in logical pixels (slurp format)
     -d, --delay SECS      Wait before capturing
-    -b, --backend NAME    Force a backend: ext, wlr, kwin, portal, x11
+    -b, --backend NAME    Force a backend: ext, wlr, kwin, mutter, portal, x11
         --cursor          Include the pointer
         --fps N           Recording frame rate (default 30)
         --gif             Save the recording as a GIF (at most 15 fps)
