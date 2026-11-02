@@ -343,10 +343,6 @@ Spike:
   `sidechaincompress`, `amix`) sometimes hung at end of stream in ffmpeg
   9.0.2, and clipt waits for ffmpeg to finish with no limit, so a
   watchdog comes first.
-- To do: YAMNet through tract on music with and without vocals, and on
-  noise: how often it's right after smoothing, CPU per window, the binary
-  size it adds and its load time. It decides whether the model earns its
-  weight over the 20 dB default.
 
 ## Spike results (2026-11-01)
 
