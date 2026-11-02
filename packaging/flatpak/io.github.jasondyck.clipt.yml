@@ -24,6 +24,8 @@ finish-args:
   - --filesystem=xdg-videos
   # Render nodes, for encoding recordings on the GPU (VA-API, NVENC).
   - --device=dri
+  # Recording sound (--audio): the sound server, PulseAudio or pipewire-pulse.
+  - --socket=pulseaudio
   - --talk-name=org.freedesktop.Notifications
   - --talk-name=org.kde.StatusNotifierWatcher
   # KDE: ScreenShot2 for capture and a KWin script for window positions.
@@ -42,7 +44,8 @@ modules:
   # what src/record/encode.rs asks of it: the encoders it picks between
   # (VA-API, NVENC loaded from the NVIDIA driver at run time, libx264), the
   # Matroska stream it's fed, the containers clipt accepts (.mp4 .mkv .mov
-  # .gif) and the filters in its command lines.
+  # .gif), the filters in its command lines, and for sound: PCM in, AAC
+  # out, the resampler and mixer.
   - name: x264
     buildsystem: autotools
     config-opts:
@@ -79,7 +82,6 @@ modules:
       - --disable-ffplay
       - --disable-ffprobe
       - --disable-network
-      - --disable-swresample
       - --disable-shared
       - --enable-static
       - --enable-gpl
@@ -92,11 +94,11 @@ modules:
       - --enable-indev=lavfi
       # Frames arrive as Matroska; a GIF is made from the finished MP4.
       - --enable-demuxer=matroska,mov
-      - --enable-decoder=rawvideo,h264,wrapped_avframe
+      - --enable-decoder=rawvideo,h264,wrapped_avframe,pcm_s16le
       - --enable-parser=h264
-      - --enable-encoder=libx264,h264_vaapi,h264_nvenc,gif
+      - --enable-encoder=libx264,h264_vaapi,h264_nvenc,gif,aac
       - --enable-muxer=mp4,mov,matroska,gif,null
-      - --enable-filter=color,format,pad,scale,hwupload,scale_vaapi,fps,split,palettegen,paletteuse,null
+      - --enable-filter=color,format,pad,scale,hwupload,scale_vaapi,fps,split,palettegen,paletteuse,null,aresample,amix,asplit,volume,anullsrc
     cleanup:
       - /include
       - /lib

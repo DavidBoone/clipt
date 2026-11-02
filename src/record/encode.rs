@@ -139,20 +139,11 @@ fn probe(c: &Codec) -> Result<()> {
 /// Fails, saying so, if this ffmpeg can't encode the AAC sound recordings
 /// use or mix sources (a minimal build may leave them out).
 pub fn check_aac() -> Result<()> {
+    // Silence as 16-bit samples, as recordings send them: a minimal ffmpeg
+    // (the Flatpak's) has that decoder, not the 8-bit one anullsrc gives.
+    let silence = "anullsrc=r=48000:cl=stereo,aformat=sample_fmts=s16";
     let out = Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "anullsrc=r=48000:cl=stereo",
-            "-f",
-            "lavfi",
-            "-i",
-            "anullsrc=r=48000:cl=stereo",
-        ])
+        .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", silence, "-f", "lavfi", "-i", silence])
         .args([
             "-t",
             "0.1",
