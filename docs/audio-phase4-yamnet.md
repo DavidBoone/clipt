@@ -104,8 +104,8 @@ Each song's vocal and NoVox versions are the same backing track with and
 without the vocals. After aligning the two versions at zero lag and fitting a
 single gain, the difference is the vocal plus any mastering or encoding
 difference. A window is labelled **music with vocals** when the difference's
-RMS is more than 8 dB below the vocal mix's RMS (that is, the difference is
-substantial). Vocal windows with a weaker difference are treated as
+RMS is no more than 8 dB below the vocal mix's RMS (that is, the difference
+is substantial). Vocal windows with a weaker difference are treated as
 ambiguous and left out of the confusion table, and all NoVox windows are
 labelled **instrumental music**. This gives 146 vocal windows out of the 225
 vocal-version windows, and 225 instrumental windows. The rest are excluded.
