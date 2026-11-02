@@ -36,6 +36,8 @@ _clipt() {
     '--resume[resume the running recording]'
     '--toggle-pause[toggle pausing]'
     '--gif[save the recording as a GIF]'
+    '--audio=-[record sound too]::source:(system none)'
+    '--no-audio[record without sound]'
   )
   update=( '--check[only check for updates]' )
 
@@ -103,6 +105,8 @@ _clipt_args() {
           '--resume:resume the running recording'
           '--toggle-pause:toggle pausing'
           '--gif:save the recording as a GIF'
+          '--audio:record sound too'
+          '--no-audio:record without sound'
         )
         ;;
       update)

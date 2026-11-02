@@ -140,6 +140,15 @@ Recording frame rate, 1 to 240 (default 30); overrides \fBrecord_fps\fR.
 Save the recording as a GIF, made from the recording when it stops, at most
 15 frames a second.
 .TP
+\fB\-\-audio\fR[\fB=\fR\fISOURCE\fR]
+Record sound too: \fBsystem\fR (what the computer is playing, the default)
+or \fBnone\fR.
+Overrides \fBrecord_audio\fR.
+Needs a PulseAudio or pipewire-pulse sound server; GIFs have no sound.
+.TP
+\fB\-\-no\-audio\fR
+Record without sound, whatever \fBrecord_audio\fR says.
+.TP
 \fB\-\-stop\fR, \fB\-\-pause\fR, \fB\-\-resume\fR, \fB\-\-toggle\-pause\fR
 Control a running recording; see \fBrecord\fR under COMMANDS.
 .TP
@@ -244,6 +253,9 @@ Encoder: \fBauto\fR, \fBvaapi\fR, \fBnvenc\fR or \fBx264\fR.
 \fBrecord_format\fR = \fI"mp4"\fR
 \fBmp4\fR or \fBgif\fR, for recordings saved to \fBvideo_dir\fR.
 An \fB\-o\fR path's extension takes precedence.
+.TP
+\fBrecord_audio\fR = \fI"none"\fR
+Sound to record: \fBnone\fR or \fBsystem\fR.
 .TP
 \fBmax_duration\fR = \fI3600\fR
 A recording stops by itself after this many seconds; 0 means no limit.

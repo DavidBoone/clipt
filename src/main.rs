@@ -51,6 +51,8 @@ OPTIONS:
         --cursor          Include the pointer
         --fps N           Recording frame rate (default 30)
         --gif             Save the recording as a GIF (at most 15 fps)
+        --audio[=SOURCE]  Record sound too: system (default) or none
+        --no-audio        Record without sound, whatever record_audio says
     -h, --help            Show this help
     -V, --version         Show the version
 
@@ -65,8 +67,9 @@ EDITOR KEYS:
 
 Config: ~/.config/clipt/config.toml (save_dir, filename, color, width,
 copy_on_save, notify, backend, cursor, font, video_dir, video_filename,
-record_fps, record_codec, record_format, max_duration). Recording needs
-ffmpeg; on KDE and GNOME also PipeWire.
+record_fps, record_codec, record_format, record_audio, max_duration).
+Recording needs ffmpeg; on KDE and GNOME also PipeWire; with sound, a
+PulseAudio or pipewire-pulse server.
 ";
 
 #[derive(Default)]
@@ -85,6 +88,8 @@ struct Args {
     stop: bool,
     pause: Option<record::PauseCmd>,
     gif: bool,
+    /// --audio[=SOURCE] or --no-audio ("none").
+    audio: Option<String>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -103,6 +108,8 @@ fn parse_args() -> Result<Args> {
             Long("check") => a.check = true,
             Long("fps") => a.fps = Some(p.value()?.parse()?),
             Long("gif") => a.gif = true,
+            Long("audio") => a.audio = Some(p.optional_value().map(|v| v.string()).transpose()?.unwrap_or_else(|| "system".into())),
+            Long("no-audio") => a.audio = Some("none".into()),
             Long("stop") => a.stop = true,
             Long("pause") => a.pause = Some(record::PauseCmd::Pause),
             Long("resume") => a.pause = Some(record::PauseCmd::Resume),
@@ -184,8 +191,14 @@ fn run() -> Result<()> {
     {
         return record::pause(cmd);
     }
+    let mut audio = None;
     if args.cmd == "record" {
         record::ensure_idle()?;
+        // Before the overlay: a bad setting or missing library stops here.
+        audio = record::audio::Source::parse(args.audio.as_deref().unwrap_or(&cfg.record_audio))?;
+        if audio.is_some() {
+            record::audio::check()?;
+        }
     }
     let cursor = args.cursor || cfg.cursor;
     if args.delay > 0.0 {
@@ -210,7 +223,7 @@ fn run() -> Result<()> {
             },
             (Some(m), None) => bail!("unknown recording mode '{m}' (screen, region, or -g GEOM)"),
         };
-        let opts = record::Options { target, output: args.output.clone(), fps: args.fps, cursor, backend, gif: args.gif };
+        let opts = record::Options { target, output: args.output.clone(), fps: args.fps, cursor, backend, gif: args.gif, audio };
         return record::run(&cfg, opts);
     }
 

@@ -1,7 +1,8 @@
 //! Just enough Matroska to hand ffmpeg uncompressed frames *with their
 //! timestamps*: an EBML header, a live (unknown-size) Segment, one video
-//! track (`V_UNCOMPRESSED`, pixel layout as a FourCC) and one Cluster per
-//! frame holding a single SimpleBlock.
+//! track (`V_UNCOMPRESSED`, pixel layout as a FourCC), optionally a sound
+//! track (`A_PCM/INT/LIT`), and one Cluster per frame or sound chunk holding
+//! a single SimpleBlock.
 //!
 //! Raw video on a pipe has no timestamps, and letting ffmpeg stamp frames on
 //! arrival depends on when it gets round to reading them, which drifted by
@@ -48,10 +49,14 @@ fn fourcc(order: PixelOrder) -> &'static [u8; 4] {
     }
 }
 
+pub const VIDEO: u8 = 1;
+pub const AUDIO: u8 = 2;
+
 /// Everything before the first frame. `frame_ns` is the nominal frame
 /// interval: ffmpeg uses it for the last frame's duration and its frame-rate
-/// guess (otherwise taken from the first, often sparse, timestamps).
-pub fn header(width: u32, height: u32, order: PixelOrder, frame_ns: u64) -> Vec<u8> {
+/// guess (otherwise taken from the first, often sparse, timestamps). With
+/// `audio`, a second track carries 16-bit stereo PCM at that rate.
+pub fn header(width: u32, height: u32, order: PixelOrder, frame_ns: u64, audio: Option<u32>) -> Vec<u8> {
     let ebml = [
         uint(&[0x42, 0x86], 1),              // EBMLVersion
         uint(&[0x42, 0xf7], 1),              // EBMLReadVersion
@@ -75,8 +80,8 @@ pub fn header(width: u32, height: u32, order: PixelOrder, frame_ns: u64) -> Vec<
     ]
     .concat();
     let track = [
-        uint(&[0xd7], 1),                    // TrackNumber
-        uint(&[0x73, 0xc5], 1),              // TrackUID
+        uint(&[0xd7], VIDEO as u64),         // TrackNumber
+        uint(&[0x73, 0xc5], VIDEO as u64),   // TrackUID
         uint(&[0x83], 1),                    // TrackType: video
         uint(&[0x23, 0xe3, 0x83], frame_ns), // DefaultDuration
         element(&[0x86], b"V_UNCOMPRESSED"), // CodecID
@@ -87,15 +92,34 @@ pub fn header(width: u32, height: u32, order: PixelOrder, frame_ns: u64) -> Vec<
     // Segment of unknown size: it's a live stream.
     v.extend([0x18, 0x53, 0x80, 0x67, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
     v.extend(element(&[0x15, 0x49, 0xa9, 0x66], &info));
-    v.extend(element(&[0x16, 0x54, 0xae, 0x6b], &element(&[0xae], &track)));
+    let mut tracks = element(&[0xae], &track);
+    if let Some(rate) = audio {
+        let sound = [
+            element(&[0xb5], &(rate as f64).to_be_bytes()), // SamplingFrequency
+            uint(&[0x9f], 2),                               // Channels
+            uint(&[0x62, 0x64], 16),                        // BitDepth
+        ]
+        .concat();
+        let track = [
+            uint(&[0xd7], AUDIO as u64),        // TrackNumber
+            uint(&[0x73, 0xc5], AUDIO as u64),  // TrackUID
+            uint(&[0x83], 2),                   // TrackType: audio
+            element(&[0x86], b"A_PCM/INT/LIT"), // CodecID
+            element(&[0xe1], &sound),
+        ]
+        .concat();
+        tracks.extend(element(&[0xae], &track));
+    }
+    v.extend(element(&[0x16, 0x54, 0xae, 0x6b], &tracks));
     v
 }
 
-/// The bytes before a frame of `len` bytes shown at `ts_ms`; the frame
+/// The bytes before a block of `len` bytes for `track` at `ts_ms`; the data
 /// follows directly, so it never needs copying.
-pub fn frame_prefix(ts_ms: u64, len: usize) -> Vec<u8> {
-    // SimpleBlock: track 1, relative timestamp 0, keyframe.
-    let block_head = [0x81, 0x00, 0x00, 0x80];
+pub fn block_prefix(track: u8, ts_ms: u64, len: usize) -> Vec<u8> {
+    // SimpleBlock: track (as a 1-byte EBML number), relative timestamp 0,
+    // keyframe.
+    let block_head = [0x80 | track, 0x00, 0x00, 0x80];
     let block_len = (block_head.len() + len) as u64;
     let ts = uint(&[0xe7], ts_ms);
     let mut block = vec![0xa3];
@@ -129,12 +153,26 @@ mod tests {
     }
 
     #[test]
-    fn frame_prefix_lengths_add_up() {
+    fn block_prefix_lengths_add_up() {
         let len = 1920 * 1080 * 4;
-        let p = frame_prefix(1500, len);
+        let p = block_prefix(VIDEO, 1500, len);
         assert_eq!(&p[..4], &[0x1f, 0x43, 0xb6, 0x75]);
         // cluster size (4 bytes here) covers everything after it, frame included
         let cluster = u64::from_be_bytes([0, 0, 0, 0, p[4] & 0x0f, p[5], p[6], p[7]]);
         assert_eq!(cluster as usize, p.len() - 8 + len);
+        let a = block_prefix(AUDIO, 20, 3840);
+        assert_eq!(a[a.len() - 4], 0x82, "the block names track 2");
+    }
+
+    #[test]
+    fn audio_track_only_when_asked() {
+        let v = header(320, 240, PixelOrder::Bgrx, 33_333_333, None);
+        let a = header(320, 240, PixelOrder::Bgrx, 33_333_333, Some(48_000));
+        let has = |h: &[u8]| h.windows(13).any(|w| w == b"A_PCM/INT/LIT");
+        assert!(!has(&v) && has(&a));
+        // 48 000 as a big-endian double, after SamplingFrequency's ID and size.
+        let mut freq = vec![0xb5, 0x88];
+        freq.extend(48_000f64.to_be_bytes());
+        assert!(a.windows(freq.len()).any(|w| w == freq));
     }
 }

@@ -6,6 +6,13 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `clipt record --audio` records the sound the computer is playing along
+  with the video, kept in sync and left out while paused. Off unless asked
+  for (`--audio`, or `record_audio = "system"`); `--no-audio` overrides the
+  setting. Needs a PulseAudio or pipewire-pulse server: libpulse-simple is
+  loaded only when recording sound, so clipt still starts without it.
+
 ### Fixed
 - The man page and the shell completions were missing `--gif` and
   `record_format`, and the man page and README still said X11 and the

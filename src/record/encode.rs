@@ -10,7 +10,9 @@
 //! Frames reach ffmpeg in a minimal Matroska stream (see `mkv.rs`) that
 //! carries each frame's capture time, and the output keeps those times
 //! (variable frame rate): frames only need sending when the screen changed,
-//! and a slow encoder drops frames instead of slowing the video down.
+//! and a slow encoder drops frames instead of slowing the video down. Sound,
+//! when recorded, travels in the same stream with timestamps from the same
+//! clock, and is encoded as AAC.
 
 use crate::capture::PixelOrder;
 use anyhow::{Context, Result, bail};
@@ -134,6 +136,30 @@ fn probe(c: &Codec) -> Result<()> {
     bail!("{}", err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("failed").trim())
 }
 
+/// Fails, saying so, if this ffmpeg can't encode the AAC sound recordings
+/// use (a minimal build may leave it out).
+pub fn check_aac() -> Result<()> {
+    let out = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "0.1"])
+        .args(AUDIO_ARGS)
+        .args(["-f", "null", "-"])
+        .stdin(Stdio::null())
+        .output()
+        .context("running ffmpeg")?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        bail!("this ffmpeg can't encode sound (AAC): {}", err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("failed").trim());
+    }
+    Ok(())
+}
+
+/// Sound encoding. The resampler's async mode closes the tiny gaps and
+/// overlaps between chunks stamped on the system clock, and takes up the
+/// sound card's drift against it; `first_pts=0` fills any wait before the
+/// first chunk with silence (PulseAudio takes over a second to deliver it),
+/// so the sound starts with the video.
+const AUDIO_ARGS: [&str; 6] = ["-c:a", "aac", "-b:a", "160k", "-af", "aresample=async=1:first_pts=0"];
+
 pub struct Encoder {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -141,15 +167,20 @@ pub struct Encoder {
 }
 
 impl Encoder {
-    pub fn spawn(codec: &Codec, w: u32, h: u32, order: PixelOrder, fps: u32, path: &Path) -> Result<Self> {
+    /// Start ffmpeg on a `w` x `h` video; with `audio`, also a sound track
+    /// fed through `write_audio`.
+    pub fn spawn(codec: &Codec, w: u32, h: u32, order: PixelOrder, fps: u32, audio: bool, path: &Path) -> Result<Self> {
         let mut cmd = Command::new("ffmpeg");
         cmd.args(["-hide_banner", "-loglevel", "error", "-y"]).args(codec.global_args());
         cmd.args(["-f", "matroska", "-i", "pipe:0"]);
         cmd.args(codec.output_args(w, h));
+        if audio {
+            cmd.args(["-map", "0:v", "-map", "0:a"]).args(AUDIO_ARGS);
+        }
         // Variable frame rate: each frame keeps its capture time, to the
         // millisecond (left to itself, ffmpeg picks a time base from its
         // frame-rate guess, which can snap timestamps to a coarse grid).
-        cmd.args(["-enc_time_base", "1/1000"]);
+        cmd.args(["-enc_time_base:v", "1/1000"]);
         cmd.args(["-fps_mode", "passthrough"]);
         if matches!(path.extension().and_then(|e| e.to_str()), Some("mp4" | "mov")) {
             cmd.args(["-movflags", "+faststart"]);
@@ -168,15 +199,22 @@ impl Encoder {
             s
         });
         let mut enc = Self { child, stdin, stderr: Some(stderr) };
-        enc.send(&super::mkv::header(w, h, order, 1_000_000_000 / fps.max(1) as u64))?;
+        let rate = audio.then_some(super::audio::RATE);
+        enc.send(&super::mkv::header(w, h, order, 1_000_000_000 / fps.max(1) as u64, rate))?;
         Ok(enc)
     }
 
     /// Send a frame to be shown `ts_ms` milliseconds into the video.
     /// Timestamps must increase.
     pub fn write(&mut self, frame: &[u8], ts_ms: u64) -> Result<()> {
-        self.send(&super::mkv::frame_prefix(ts_ms, frame.len()))?;
+        self.send(&super::mkv::block_prefix(super::mkv::VIDEO, ts_ms, frame.len()))?;
         self.send(frame)
+    }
+
+    /// Send a chunk of sound heard `ts_ms` milliseconds into the video.
+    pub fn write_audio(&mut self, pcm: &[u8], ts_ms: u64) -> Result<()> {
+        self.send(&super::mkv::block_prefix(super::mkv::AUDIO, ts_ms, pcm.len()))?;
+        self.send(pcm)
     }
 
     fn send(&mut self, bytes: &[u8]) -> Result<()> {

@@ -1,7 +1,6 @@
 # Audio in recordings: implementation plan
 
-Status: proposed, 2026-11-01. Phase 0 (spike) done; nothing built in clipt
-yet.
+Status: phases 0 and 1 done (system sound), 2026-11-01.
 
 ## Goal
 
@@ -48,20 +47,26 @@ for, so nobody's microphone is recorded by surprise.
   recording with an error rather than eating memory.
 - **Writer** (`src/record/mod.rs`): already turns capture times into stream
   times, with paused time subtracted. Audio chunks go through the same
-  function. Chunks captured while paused are thrown away. The stream's zero
-  becomes the recording's start, not the first video frame, so audio that
-  begins before the screen first changes isn't lost. Clusters are written in
-  timestamp order: audio is held back until video has caught up, but never
-  for longer than 200 ms, because video is sparse on a still screen.
+  function, placed against a list of every pause so a chunk next to a pause
+  lands exactly; chunks heard while paused are thrown away. Time zero stays
+  the first video frame, which arrives at once (capture always sends a first
+  frame), so at most a chunk is lost before it. Chunks are written as they
+  arrive rather than interleaved by timestamp: ffmpeg orders the two tracks
+  itself, and the tests show the lengths and pauses come out right. After a
+  stop, the sound thread keeps reading until a chunk stamped after the stop
+  arrives (at most 1 s), because the server's latency worth of sound is
+  still in its buffer when the stop comes.
 - **Matroska** (`src/record/mkv.rs`): a second (and third) TrackEntry
   (`A_PCM/INT/LIT`, SamplingFrequency 48 000, Channels 2, BitDepth 16).
-  SimpleBlocks already carry a track number, so `frame_prefix` gains a
-  track argument.
+  SimpleBlocks already carry a track number, so `frame_prefix` became
+  `block_prefix`, with a track argument.
 - **Encoder** (`src/record/encode.rs`): maps the audio tracks and adds
-  `-c:a aac -b:a 160k`. A resampling filter (`aresample=async=1`) takes up
-  the slow drift between the sound card's clock and the system clock
-  (under 2 parts per million in the spike, but other hardware can do worse)
-  and fills any tiny gap between chunks. With two sources:
+  `-c:a aac -b:a 160k`. A resampling filter (`aresample=async=1:first_pts=0`)
+  takes up the slow drift between the sound card's clock and the system
+  clock (under 2 parts per million in the spike, but other hardware can do
+  worse), fills any tiny gap between chunks, and fills the wait before the
+  first chunk with silence so the sound starts with the video (see
+  *PulseAudio's slow start* under Risks). With two sources:
   `amix=inputs=2:duration=longest:normalize=0`, so neither source is
   halved in volume.
 
@@ -134,9 +139,15 @@ Each phase ends with something usable, tests in CI, and a PR.
 **0. Spike (done 2026-11-01).** libpulse-simple through Python's ctypes,
 and a Python Matroska writer copying clipt's. See the spike results below.
 
-**1. System sound.** `audio.rs`, Matroska audio track, writer
-interleaving, AAC encoding, pause, `--audio` and `record_audio` (`none` and
-`system`), errors. e2e tone and pause tests on Sway, GNOME and X11.
+**1. System sound (done 2026-11-01).** `audio.rs`, Matroska audio track,
+the writer's sound handling, AAC encoding, pause, `--audio`, `--no-audio`
+and `record_audio` (`none` and `system`), errors (no libpulse-simple, no
+sound server, an ffmpeg without AAC, `mic`/`both` not yet). The man page,
+completions and README got the options now rather than in phase 3. Shared
+e2e tests (`tests/audio.sh`) on Sway and X11 with PulseAudio, on GNOME
+with pipewire-pulse: a tone is recorded at the right level, sound and video
+last as long, a tone played only while paused is left out, `--gif` with
+`--audio` warns, and a missing server stops the recording before it starts.
 
 **2. Microphone and both.** `mic` and `both`, the `amix` path, the e2e sync
 test, the microphone-missing error.
@@ -189,6 +200,14 @@ drift more.
 
 ## Risks
 
+- **PulseAudio's slow start.** Found in phase 1: PulseAudio (17, null
+  sink) took 1.5 s to deliver the first 20 ms chunk, then ran normally;
+  pipewire-pulse delivered it in 16 ms. Asking for the server's default
+  fragment size made the first read quick but the second one slow
+  instead. So on PulseAudio the first second or so of a recording is
+  silent (padded by the resampler) rather than missing. Whether real
+  sound cards on PulseAudio do the same is unchecked; opening the stream
+  before the overlay would hide it there.
 - **pipewire-pulse missing** on a minimal PipeWire install: clipt says so.
   Native PipeWire audio is the fallback to build only if this proves
   common.

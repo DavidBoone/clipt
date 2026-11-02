@@ -5,7 +5,7 @@
 
 _clipt_commands="gui full screen list record tray update"
 _clipt_common_opts="-o --output -c --clipboard -g --geometry -d --delay -b --backend --cursor --fps -h --help -V --version"
-_clipt_record_opts="--stop --pause --resume --toggle-pause --gif"
+_clipt_record_opts="--stop --pause --resume --toggle-pause --gif --audio --audio=system --audio=none --no-audio"
 _clipt_record_modes="screen region window"
 _clipt_backends="ext wlr kwin portal x11"
 
