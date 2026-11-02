@@ -41,6 +41,29 @@ pub fn stream(target: Target, cursor: bool, crop: CropFn, sink: Box<dyn FnMut(Vi
 /// Start a screencast session for `target`: its path (to stop it) and the
 /// PipeWire node its frames come from.
 fn start(conn: &crate::dbus::Connection, target: &Target, cursor: bool) -> Result<(OwnedObjectPath, u32)> {
+    let s = begin(conn, target, cursor)?;
+    let session = s.session.clone();
+    Ok((session, s.node()?))
+}
+
+/// A session Mutter has been asked to start, its PipeWire node still to be
+/// announced. Asking for several before waiting on any lets Mutter set
+/// their streams up together.
+struct Starting {
+    session: OwnedObjectPath,
+    added: crate::dbus::Signals,
+}
+
+impl Starting {
+    fn node(mut self) -> Result<u32> {
+        let msg = self.added.next().context("Mutter didn't announce the PipeWire stream")?;
+        let (node,): (u32,) = msg.body().deserialize()?;
+        debug(&format!("Mutter screencast node {node}"));
+        Ok(node)
+    }
+}
+
+fn begin(conn: &crate::dbus::Connection, target: &Target, cursor: bool) -> Result<Starting> {
     let sc = crate::dbus::Proxy::new(conn, DEST, "/org/gnome/Mutter/ScreenCast", "org.gnome.Mutter.ScreenCast")?;
     let session_path: OwnedObjectPath = sc.call("CreateSession", &(HashMap::<&str, Value>::new(),)).context("Mutter CreateSession")?;
     let session = crate::dbus::Proxy::new(conn, DEST, session_path.as_str(), SESSION)?;
@@ -55,13 +78,10 @@ fn start(conn: &crate::dbus::Connection, target: &Target, cursor: bool) -> Resul
     };
     let stream = crate::dbus::Proxy::new(conn, DEST, stream_path.as_str(), "org.gnome.Mutter.ScreenCast.Stream")?;
     // Subscribe before starting, or the node can be announced before we listen.
-    let mut added = stream.receive_signal("PipeWireStreamAdded")?;
+    let added = stream.receive_signal("PipeWireStreamAdded")?;
     session.call::<_, ()>("Start", &()).context("Mutter Start")?;
-    let msg = added.next().context("Mutter didn't announce the PipeWire stream")?;
-    let (node,): (u32,) = msg.body().deserialize()?;
-    debug(&format!("Mutter screencast node {node}"));
     drop((session, stream));
-    Ok((session_path, node))
+    Ok(Starting { session: session_path, added })
 }
 
 fn stop(conn: &crate::dbus::Connection, session: &OwnedObjectPath) {
@@ -99,18 +119,24 @@ pub fn capture(outputs: &[Output], cursor: bool) -> Result<Vec<Option<Shot>>> {
     Ok(outputs.iter().zip(frames).map(|(o, f)| f.map(|f| shot(o, f))).collect())
 }
 
-/// Start a stream per output (recording each session in `sessions`) and
-/// wait up to `SHOT_TIMEOUT` for their first frames.
+/// Start a stream per output (recording each session in `sessions`), all
+/// before waiting on any, and wait up to `SHOT_TIMEOUT` for their first
+/// frames.
 fn first_frames(
     conn: &crate::dbus::Connection,
     outputs: &[Output],
     cursor: bool,
     sessions: &mut Vec<OwnedObjectPath>,
 ) -> Result<Vec<Option<VideoFrame>>> {
+    let mut starting = Vec::with_capacity(outputs.len());
+    for o in outputs {
+        let s = begin(conn, &Target::Monitor(o.name.clone()), cursor).with_context(|| format!("capturing {}", o.name))?;
+        sessions.push(s.session.clone());
+        starting.push(s);
+    }
     let (tx, rx) = mpsc::channel();
-    for (i, o) in outputs.iter().enumerate() {
-        let (session, node) = start(conn, &Target::Monitor(o.name.clone()), cursor).with_context(|| format!("capturing {}", o.name))?;
-        sessions.push(session);
+    for (i, (o, s)) in outputs.iter().zip(starting).enumerate() {
+        let node = s.node().with_context(|| format!("capturing {}", o.name))?;
         let tx = tx.clone();
         // Detached, not scoped: a stream that never delivers must not hold
         // the screenshot up past the timeout.
