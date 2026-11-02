@@ -130,6 +130,13 @@ pub struct TextEdit {
     pub text: String,
 }
 
+/// Record mode's sound toggles: the computer's sound and the microphone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SoundToggles {
+    pub system: bool,
+    pub mic: bool,
+}
+
 pub struct Editor {
     pub screens: Vec<Screen>,
     pub swap_rb: bool,
@@ -157,6 +164,8 @@ pub struct Editor {
     pub outcome: Option<Outcome>,
     /// Picking a region to record: no annotation tools, and Enter records.
     pub record: bool,
+    /// Record mode: which sound to record with it, toggled in the toolbar.
+    pub sound: SoundToggles,
     last_click: Option<(std::time::Instant, Pt)>,
     /// Show the size/width hint pill until the next pointer move.
     pub width_hint: bool,
@@ -202,6 +211,7 @@ impl Editor {
             hover_shown: None,
             outcome: None,
             record: false,
+            sound: SoundToggles::default(),
             last_click: None,
             width_hint: false,
             revision: 0,
@@ -697,9 +707,17 @@ impl Editor {
         if self.record { Outcome::Record } else { Outcome::Copy }
     }
 
-    /// Keys in record mode: selecting and adjusting only.
+    /// Keys in record mode: selecting and adjusting, and the sound toggles.
     fn record_key(&mut self, key: Key, mods: Mods) -> bool {
         match key {
+            Key::Char('s' | 'S') if !mods.ctrl => {
+                self.sound.system = !self.sound.system;
+                return true;
+            }
+            Key::Char('m' | 'M') if !mods.ctrl => {
+                self.sound.mic = !self.sound.mic;
+                return true;
+            }
             Key::Escape | Key::Enter | Key::Tab | Key::Left | Key::Right | Key::Up | Key::Down => {}
             Key::Char('a' | 'A') if mods.ctrl => {}
             _ => return false,
@@ -718,6 +736,8 @@ impl Editor {
     fn press_button(&mut self, b: ui::Button) {
         match b {
             ui::Button::Record => self.outcome = Some(Outcome::Record),
+            ui::Button::SystemSound => self.sound.system = !self.sound.system,
+            ui::Button::Mic => self.sound.mic = !self.sound.mic,
             ui::Button::Tool(t) => self.tool = t,
             ui::Button::Color(i) => self.color = i,
             ui::Button::Undo => self.undo(),
@@ -949,7 +969,17 @@ mod tests {
         ed.key(Key::Right, Mods::default());
         assert_eq!(ed.sel.unwrap().left(), 101.0, "arrows still nudge");
         let (_, buttons) = ui::toolbar_layout(&ed).unwrap();
-        assert_eq!(buttons.iter().map(|b| b.1).collect::<Vec<_>>(), vec![ui::Button::Record, ui::Button::Close]);
+        assert_eq!(
+            buttons.iter().map(|b| b.1).collect::<Vec<_>>(),
+            vec![ui::Button::Record, ui::Button::SystemSound, ui::Button::Mic, ui::Button::Close]
+        );
+        // The sound toggles: S and M, or their buttons.
+        assert_eq!(ed.sound, SoundToggles::default());
+        assert!(ed.key(Key::Char('s'), Mods::default()) && ed.key(Key::Char('M'), Mods::default()));
+        assert_eq!(ed.sound, SoundToggles { system: true, mic: true });
+        ed.press_button(ui::Button::Mic);
+        assert_eq!(ed.sound, SoundToggles { system: true, mic: false });
+        assert_eq!(ed.outcome, None, "toggling doesn't start or cancel anything");
         ed.key(Key::Enter, Mods::default());
         assert_eq!(ed.outcome, Some(Outcome::Record));
         ed.record = true;

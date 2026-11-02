@@ -347,6 +347,25 @@ fi
 if [ "$LAYOUT" = single ]; then
   . /audio.sh
   audio_tests "100,50 301x200"
+
+  echo "-- recording: sound toggles in the overlay"
+  tone_on; sleep 0.5
+  /clipt record -o /tmp/rec-ovs.mp4 2>/tmp/rec.err & rp=$!; sleep 1
+  drag 100 100 400 300
+  act "key s" "key Return"; sleep 3.5
+  /clipt record --stop 2>/dev/null; wait $rp
+  check "S in the overlay turns sound on ($(a_codec /tmp/rec-ovs.mp4))" '[ "$(a_codec /tmp/rec-ovs.mp4)" = aac ]'
+  # With sound on in the config, S turns it off for this recording.
+  cfg=$HOME/.config/clipt/config.toml; mkdir -p "$(dirname $cfg)"; cp $cfg /tmp/cfg.bak 2>/dev/null
+  echo 'record_audio = "system"' >> $cfg
+  /clipt record -o /tmp/rec-ovn.mp4 2>/tmp/rec.err & rp=$!; sleep 1
+  drag 100 100 400 300
+  act "key s" "key Return"; sleep 2
+  /clipt record --stop 2>/dev/null; wait $rp
+  tone_off
+  if [ -e /tmp/cfg.bak ]; then mv /tmp/cfg.bak $cfg; else rm -f $cfg; fi
+  check "...and off when record_audio has it on (streams: $(a_codec /tmp/rec-ovn.mp4))" '[ -s /tmp/rec-ovn.mp4 ] && [ -z "$(a_codec /tmp/rec-ovn.mp4)" ]'
+  gerr
 fi
 
 exec 3>&-

@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::Duration;
 use zbus::object_server::SignalEmitter;
 use zbus::{Connection, OwnedObjectPath, OwnedVariant, Structure, Variant, interface};
@@ -41,6 +41,7 @@ enum Action {
     Full,
     RecordRegion,
     RecordScreen,
+    ToggleSound,
     PauseRecording,
     ResumeRecording,
     StopRecording,
@@ -58,6 +59,7 @@ const MENU: &[(i32, Option<(&str, Action)>)] = &[
     (4, None),
     (20, Some(("Record region…", Action::RecordRegion))),
     (21, Some(("Record screen", Action::RecordScreen))),
+    (27, Some(("Record sound", Action::ToggleSound))),
     (22, Some(("Pause recording", Action::PauseRecording))),
     (23, Some(("Resume recording", Action::ResumeRecording))),
     (24, Some(("Stop recording", Action::StopRecording))),
@@ -90,7 +92,7 @@ fn menu(rec: u8) -> impl Iterator<Item = &'static (i32, Option<(&'static str, Ac
     MENU.iter().filter(move |(id, _)| {
         let hidden = match id {
             6 | 7 => flatpak,
-            20 | 21 => rec != IDLE,
+            20 | 21 | 27 => rec != IDLE,
             22 => rec != RECORDING,
             23 => rec != PAUSED,
             24 => rec == IDLE,
@@ -105,6 +107,22 @@ struct Dirs {
     video: String,
 }
 
+/// The "Record sound" checkbox, and whether `record_audio` names sources:
+/// if it does, a ticked box records those, otherwise the computer's sound.
+static SOUND: AtomicBool = AtomicBool::new(false);
+static SOUND_CONFIGURED: AtomicBool = AtomicBool::new(false);
+/// The menu changed without the recording state changing (the checkbox).
+static MENU_DIRTY: AtomicBool = AtomicBool::new(false);
+
+/// What a recording started from the tray passes for sound.
+fn sound_args() -> &'static [&'static str] {
+    match (SOUND.load(Ordering::SeqCst), SOUND_CONFIGURED.load(Ordering::SeqCst)) {
+        (false, _) => &["--no-audio"],
+        (true, true) => &[],
+        (true, false) => &["--audio"],
+    }
+}
+
 fn run_action(a: Action, dirs: &Dirs) {
     let exe = crate::update::current_exe();
     let open = |d: &str| {
@@ -115,8 +133,13 @@ fn run_action(a: Action, dirs: &Dirs) {
         Action::Region => Command::new(&exe).args(["gui", "-d", CLICK_DELAY]).spawn(),
         Action::RegionDelayed => Command::new(&exe).args(["gui", "-d", "3"]).spawn(),
         Action::Full => Command::new(&exe).args(["full", "-c", "-d", CLICK_DELAY]).spawn(),
-        Action::RecordRegion => Command::new(&exe).args(["record", "-d", CLICK_DELAY]).spawn(),
-        Action::RecordScreen => Command::new(&exe).args(["record", "screen", "-d", CLICK_DELAY]).spawn(),
+        Action::RecordRegion => Command::new(&exe).args(["record", "-d", CLICK_DELAY]).args(sound_args()).spawn(),
+        Action::RecordScreen => Command::new(&exe).args(["record", "screen", "-d", CLICK_DELAY]).args(sound_args()).spawn(),
+        Action::ToggleSound => {
+            SOUND.fetch_xor(true, Ordering::SeqCst);
+            MENU_DIRTY.store(true, Ordering::SeqCst);
+            return;
+        }
         Action::PauseRecording => Command::new(&exe).args(["record", "--pause"]).spawn(),
         Action::ResumeRecording => Command::new(&exe).args(["record", "--resume"]).spawn(),
         Action::StopRecording => Command::new(&exe).args(["record", "--stop"]).spawn(),
@@ -355,8 +378,12 @@ fn owned(v: Variant<'_>) -> OwnedVariant {
 fn item_props(entry: Option<(&str, Action)>) -> Props {
     let mut p = Props::new();
     match entry {
-        Some((label, _)) => {
+        Some((label, a)) => {
             p.insert("label".into(), owned(Variant::from(label)));
+            if matches!(a, Action::ToggleSound) {
+                p.insert("toggle-type".into(), owned(Variant::from("checkmark")));
+                p.insert("toggle-state".into(), owned(Variant::from(SOUND.load(Ordering::SeqCst) as i32)));
+            }
         }
         None => {
             p.insert("type".into(), owned(Variant::from("separator")));
@@ -480,17 +507,21 @@ async fn register(conn: &Connection, name: &str) -> zbus::Result<()> {
 }
 
 /// Follow the recording state (a pidfile, checked twice a second) and tell
-/// the tray host when it changes, so the icon, tooltip and menu follow.
+/// the tray host when it changes, so the icon, tooltip and menu follow; and
+/// the menu alone when the sound checkbox changes.
 fn watch_recording(conn: Connection, rec: Arc<AtomicU8>) {
     loop {
         let now = rec_state();
-        if rec.swap(now, Ordering::SeqCst) != now {
+        let state_changed = rec.swap(now, Ordering::SeqCst) != now;
+        if state_changed || MENU_DIRTY.swap(false, Ordering::SeqCst) {
             MENU_REVISION.fetch_add(1, Ordering::SeqCst);
             let rev = MENU_REVISION.load(Ordering::SeqCst);
             zbus::block_on(async {
                 let item = "org.kde.StatusNotifierItem";
-                let _ = conn.emit_signal(None::<&str>, ITEM_PATH, item, "NewIcon", &()).await;
-                let _ = conn.emit_signal(None::<&str>, ITEM_PATH, item, "NewToolTip", &()).await;
+                if state_changed {
+                    let _ = conn.emit_signal(None::<&str>, ITEM_PATH, item, "NewIcon", &()).await;
+                    let _ = conn.emit_signal(None::<&str>, ITEM_PATH, item, "NewToolTip", &()).await;
+                }
                 let _ = conn.emit_signal(None::<&str>, MENU_PATH, "com.canonical.dbusmenu", "LayoutUpdated", &(rev, 0i32)).await;
             });
         }
@@ -498,7 +529,10 @@ fn watch_recording(conn: Connection, rec: Arc<AtomicU8>) {
     }
 }
 
-pub fn run(save_dir: String, video_dir: String, check_updates: bool) -> Result<()> {
+/// `sound`: whether `record_audio` names sources (the checkbox starts ticked).
+pub fn run(save_dir: String, video_dir: String, check_updates: bool, sound: bool) -> Result<()> {
+    SOUND.store(sound, Ordering::SeqCst);
+    SOUND_CONFIGURED.store(sound, Ordering::SeqCst);
     // Children are fire-and-forget; let the kernel reap them.
     // SAFETY: setting a signal disposition to SIG_IGN has no handler to race.
     unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
@@ -607,5 +641,24 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), MENU.len());
+    }
+
+    #[test]
+    fn sound_checkbox() {
+        assert!(labels(IDLE).contains(&"Record sound") && !labels(RECORDING).contains(&"Record sound"));
+        let entry = MENU.iter().find(|(id, _)| *id == 27).unwrap().1;
+        let state = || i32::try_from(item_props(entry)["toggle-state"].try_clone().unwrap()).unwrap();
+        assert_eq!(<&str>::try_from(&*item_props(entry)["toggle-type"]).unwrap(), "checkmark");
+        // Off: recordings say so, whatever the config says.
+        SOUND.store(false, Ordering::SeqCst);
+        assert_eq!((state(), sound_args()), (0, &["--no-audio"][..]));
+        // On, with sources configured: they apply as they are.
+        SOUND_CONFIGURED.store(true, Ordering::SeqCst);
+        run_action(Action::ToggleSound, &Dirs { save: String::new(), video: String::new() });
+        assert_eq!((state(), sound_args()), (1, &[][..]));
+        assert!(MENU_DIRTY.swap(false, Ordering::SeqCst), "the host is told");
+        // On, with none configured: the computer's sound.
+        SOUND_CONFIGURED.store(false, Ordering::SeqCst);
+        assert_eq!(sound_args(), &["--audio"]);
     }
 }

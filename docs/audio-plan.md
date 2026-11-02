@@ -1,8 +1,8 @@
 # Audio in recordings: implementation plan
 
-Status: phases 0–2 done (system sound; microphone, several sources, volumes,
-separate tracks, devices), 2026-11-01. Phase 3 (controls, Flatpak) next;
-phase 4 (smart balance) proposed.
+Status: phases 0–3 done (system sound; several sources, volumes, separate
+tracks, devices; overlay and tray controls, the Flatpak), 2026-11-01. Phase
+4 (smart balance) proposed.
 
 ## Goal
 
@@ -180,10 +180,18 @@ doesn't exist, and the recording ran on with nothing from it, so named
 devices are now checked against the server's list before recording, and a
 source that has delivered nothing after 5 s stops the recording.
 
-**3. Controls and packaging.** Overlay toggle, tray checkbox, Flatpak
-permission and ffmpeg components (now also `asplit`, `amix` and `volume`).
-The man page, completions, README and CHANGELOG already cover phases 1
-and 2.
+**3. Controls and packaging (done 2026-11-01).** The overlay's record
+toolbar has speaker and microphone toggles (**S**, **M**) that start from
+the setting and swap `system` and `mic` in or out for that recording,
+keeping named devices and volumes; the tray has a *Record sound* checkbox
+(ticked when `record_audio` names sources; unticked passes `--no-audio`).
+The Flatpak has `--socket=pulseaudio`, and its ffmpeg the PCM decoder, AAC
+encoder, swresample and the sound filters (7.8 MB, from 6.9). Found on the
+way: the AAC check's `anullsrc` makes 8-bit samples, whose decoder the
+Flatpak's ffmpeg lacks, so the check now asks for 16-bit, as recordings
+send. Tested: Sway e2e (S in the overlay turns sound on, and off when the
+setting has it on), unit tests for the toggles and the tray checkbox, the
+toolbar rendered and looked at, and a tone recorded through the Flatpak.
 
 **4. Smart balance (proposed).** Keeping a voice intelligible over the
 desktop's sound, from the voice-over-music rules below. Starts with a

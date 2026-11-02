@@ -17,6 +17,10 @@ pub enum Button {
     Copy,
     Close,
     Record,
+    /// Record mode: toggle the computer's sound.
+    SystemSound,
+    /// Record mode: toggle the microphone.
+    Mic,
 }
 
 impl Button {
@@ -29,6 +33,8 @@ impl Button {
             Button::Copy => 4,
             Button::Close => 5,
             Button::Record => 6,
+            Button::SystemSound => 7,
+            Button::Mic => 8,
         }
     }
 }
@@ -67,7 +73,14 @@ enum Item {
 
 fn items(ed: &Editor) -> Vec<Item> {
     if ed.record {
-        return vec![Item::Btn(Button::Record), Item::Btn(Button::Close)];
+        return vec![
+            Item::Btn(Button::Record),
+            Item::Sep,
+            Item::Btn(Button::SystemSound),
+            Item::Btn(Button::Mic),
+            Item::Sep,
+            Item::Btn(Button::Close),
+        ];
     }
     let mut v = vec![Item::Btn(Button::Tool(Tool::Select))];
     v.extend(Tool::DRAWING.iter().map(|&t| Item::Btn(Button::Tool(t))));
@@ -651,7 +664,12 @@ fn draw_toolbar(ed: &Editor, pm: &mut PixmapMut, view: &View, panel: Rect, btns:
                 circle(pm, view, (cx, cy), rad, Some(c), Some((Color::from_rgba8(255, 255, 255, 60), 1.0)));
             }
             _ => {
-                let active = matches!(b, Button::Tool(t) if t == ed.tool);
+                let active = match b {
+                    Button::Tool(t) => t == ed.tool,
+                    Button::SystemSound => ed.sound.system,
+                    Button::Mic => ed.sound.mic,
+                    _ => false,
+                };
                 let inset = Rect::from_xywh(r.left() + 1.0, r.top() + 1.0, r.width() - 2.0, r.height() - 2.0).unwrap();
                 if active {
                     pm.fill_path(&rounded(view, inset, 8.0), &view.paint(ACCENT()), FillRule::Winding, id, None);
@@ -672,6 +690,10 @@ fn draw_toolbar(ed: &Editor, pm: &mut PixmapMut, view: &View, panel: Rect, btns:
                     ICON()
                 };
                 icon(ed, pm, view, r, b, fg);
+                // A sound toggle that's off is struck through.
+                if (b == Button::SystemSound && !ed.sound.system) || (b == Button::Mic && !ed.sound.mic) {
+                    strike(pm, view, r, fg);
+                }
             }
         }
     }
@@ -680,7 +702,7 @@ fn draw_toolbar(ed: &Editor, pm: &mut PixmapMut, view: &View, panel: Rect, btns:
     if let Some(b) = hover
         && let Some((r, _)) = btns.iter().find(|(_, x)| *x == b)
     {
-        let t = tooltip(b);
+        let t = tooltip(ed, b);
         let fs = 12.0;
         let w = text::measure(&ed.fonts.regular, fs * view.scale, &t) / view.scale + 16.0;
         let above = panel.top() - 30.0;
@@ -692,7 +714,8 @@ fn draw_toolbar(ed: &Editor, pm: &mut PixmapMut, view: &View, panel: Rect, btns:
     }
 }
 
-fn tooltip(b: Button) -> String {
+fn tooltip(ed: &Editor, b: Button) -> String {
+    let on = |v: bool| if v { "on" } else { "off" };
     let name = |t: Tool| match t {
         Tool::Select => "Select",
         Tool::Rect => "Rectangle",
@@ -714,6 +737,23 @@ fn tooltip(b: Button) -> String {
         Button::Copy => "Copy  Enter".into(),
         Button::Close => "Cancel  Esc".into(),
         Button::Record => "Record  Enter".into(),
+        Button::SystemSound => format!("Computer sound: {}  S", on(ed.sound.system)),
+        Button::Mic => format!("Microphone: {}  M", on(ed.sound.mic)),
+    }
+}
+
+/// A diagonal line across an icon: a sound toggle that's off.
+fn strike(pm: &mut PixmapMut, view: &View, r: Rect, fg: Color) {
+    let k = 20.0 / 24.0;
+    let (ox, oy) = (r.left() + (r.width() - 20.0) / 2.0, r.top() + (r.height() - 20.0) / 2.0);
+    let a = view.px((ox + 4.0 * k, oy + 4.0 * k));
+    let b = view.px((ox + 20.0 * k, oy + 20.0 * k));
+    let mut pb = PathBuilder::new();
+    pb.move_to(a.0, a.1);
+    pb.line_to(b.0, b.1);
+    if let Some(p) = pb.finish() {
+        let st = Stroke { width: 1.8 * view.scale, line_cap: LineCap::Round, ..Default::default() };
+        pm.stroke_path(&p, &view.paint(fg), &st, Transform::identity(), None);
     }
 }
 
@@ -831,6 +871,38 @@ fn icon(ed: &Editor, pm: &mut PixmapMut, view: &View, r: Rect, b: Button, fg: Co
         Button::Close => {
             line(&mut pb, &[(6.0, 6.0), (18.0, 18.0)]);
             line(&mut pb, &[(18.0, 6.0), (6.0, 18.0)]);
+        }
+        Button::SystemSound => {
+            // speaker and two waves
+            line(&mut pb, &[(3.0, 9.5), (7.0, 9.5), (12.0, 5.0), (12.0, 19.0), (7.0, 14.5), (3.0, 14.5), (3.0, 9.5)]);
+            line(&mut pb, &[(15.5, 9.0), (16.6, 12.0), (15.5, 15.0)]);
+            line(&mut pb, &[(18.5, 6.5), (20.5, 12.0), (18.5, 17.5)]);
+        }
+        Button::Mic => {
+            // capsule, holder and stand
+            line(
+                &mut pb,
+                &[
+                    (9.0, 8.0),
+                    (9.4, 5.5),
+                    (10.5, 3.9),
+                    (12.0, 3.4),
+                    (13.5, 3.9),
+                    (14.6, 5.5),
+                    (15.0, 8.0),
+                    (15.0, 11.5),
+                    (14.6, 14.0),
+                    (13.5, 15.6),
+                    (12.0, 16.1),
+                    (10.5, 15.6),
+                    (9.4, 14.0),
+                    (9.0, 11.5),
+                    (9.0, 8.0),
+                ],
+            );
+            line(&mut pb, &[(6.0, 11.0), (6.5, 14.5), (8.5, 17.4), (12.0, 18.8), (15.5, 17.4), (17.5, 14.5), (18.0, 11.0)]);
+            line(&mut pb, &[(12.0, 18.8), (12.0, 21.0)]);
+            line(&mut pb, &[(8.5, 21.0), (15.5, 21.0)]);
         }
         Button::Color(_) => {}
     }
