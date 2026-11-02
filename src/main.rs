@@ -69,6 +69,7 @@ EDITOR KEYS:
     Shift                 square / 45°    arrows         nudge (Shift resizes)
     Enter, Ctrl+C, dbl-click  copy        Ctrl+S         save
     Ctrl+Z / Ctrl+Shift+Z undo / redo     Esc / right-click  cancel / back
+    S / M (record mode)   computer sound / microphone on or off
 
 Config: ~/.config/clipt/config.toml (save_dir, filename, color, width,
 copy_on_save, notify, backend, cursor, font, video_dir, video_filename,
@@ -190,6 +191,7 @@ fn run() -> Result<()> {
             config::expand(&cfg.save_dir).display().to_string(),
             config::expand(&cfg.video_dir).display().to_string(),
             cfg.check_updates,
+            record::audio::Source::parse(&cfg.record_audio).is_ok_and(|s| !s.is_empty()),
         );
     }
     if args.cmd == "update" {
@@ -236,10 +238,20 @@ fn run() -> Result<()> {
                     .with_context(|| format!("no window with app id '{app}'"))?;
                 record::Target::Window(w)
             }
-            (None | Some("region" | "window"), None) => match pick_recording_area(&cfg, cursor, backend)? {
-                Some(t) => t,
-                None => return Ok(()), // cancelled
-            },
+            (None | Some("region" | "window"), None) => {
+                let (system, mic) = record::audio::Source::toggles(&audio);
+                match pick_recording_area(&cfg, cursor, backend, editor::SoundToggles { system, mic })? {
+                    Some((t, s)) => {
+                        let had = !audio.is_empty();
+                        audio = record::audio::Source::with_toggles(audio, s.system, s.mic);
+                        if !had && !audio.is_empty() {
+                            record::audio::check(&audio)?;
+                        }
+                        t
+                    }
+                    None => return Ok(()), // cancelled
+                }
+            }
             (Some(m), None) => bail!("unknown recording mode '{m}' (screen, region, or -g GEOM)"),
         };
         let separate_audio = args.separate_audio || cfg.record_separate_audio;
@@ -407,9 +419,15 @@ fn list_sound() -> Result<()> {
     Ok(())
 }
 
-/// The overlay in record mode: returns what to record (an area, or a window
-/// picked with a click), or None if cancelled.
-fn pick_recording_area(cfg: &Config, cursor: bool, backend: Option<Backend>) -> Result<Option<record::Target>> {
+/// The overlay in record mode: what to record (an area, or a window picked
+/// with a click) and the sound toggles as the user left them (starting from
+/// `sound`), or None if cancelled.
+fn pick_recording_area(
+    cfg: &Config,
+    cursor: bool,
+    backend: Option<Backend>,
+    sound: editor::SoundToggles,
+) -> Result<Option<(record::Target, editor::SoundToggles)>> {
     let font_path = cfg.font.clone();
     let fonts = std::thread::spawn(move || text::Fonts::load(font_path.as_deref()));
     let mut cap = Capturer::new()?;
@@ -423,12 +441,14 @@ fn pick_recording_area(cfg: &Config, cursor: bool, backend: Option<Backend>) -> 
     drop(cap);
     let mut ed = Editor::new(shots, fonts, true, cfg.color.saturating_sub(1), cfg.width);
     ed.record = true;
+    ed.sound = sound;
     ed.windows = wins.join().unwrap_or_default();
     let mut session = session::open(ed, kind)?;
     if session.run()? != Outcome::Record {
         return Ok(None);
     }
     let r = session.editor().final_rect().context("nothing selected")?;
+    let sound = session.editor().sound;
     let target = match session.editor().selected_window() {
         Some(w) => record::Target::Window(w.clone()),
         None => record::Target::Rect((r.left() as f64, r.top() as f64, r.width() as f64, r.height() as f64)),
@@ -437,7 +457,7 @@ fn pick_recording_area(cfg: &Config, cursor: bool, backend: Option<Backend>) -> 
     drop(session);
     // Let the compositor take the overlay down before the first frame.
     std::thread::sleep(std::time::Duration::from_millis(150));
-    Ok(Some(target))
+    Ok(Some((target, sound)))
 }
 
 fn deliver(cfg: &Config, args: &Args, img: image::Image, kind: capture::DisplayKind) -> Result<()> {

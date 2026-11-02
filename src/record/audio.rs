@@ -99,6 +99,27 @@ impl Source {
         CString::new(n).unwrap_or_default()
     }
 
+    /// Whether `sources` include the computer's sound and the microphone, as
+    /// the overlay's toggles show them.
+    pub fn toggles(sources: &[Self]) -> (bool, bool) {
+        (sources.iter().any(|s| s.device == Device::System), sources.iter().any(|s| s.device == Device::Mic))
+    }
+
+    /// `sources` with `system` and `mic` turned on or off as the overlay left
+    /// them: a source turned off goes, one turned on is added at full volume,
+    /// and everything else (named devices, volumes) stays as it was.
+    pub fn with_toggles(mut sources: Vec<Self>, system: bool, mic: bool) -> Vec<Self> {
+        for (device, on) in [(Device::System, system), (Device::Mic, mic)] {
+            let have = sources.iter().any(|s| s.device == device);
+            if have && !on {
+                sources.retain(|s| s.device != device);
+            } else if on && !have {
+                sources.push(Self { device, volume: 1.0 });
+            }
+        }
+        sources
+    }
+
     /// The track's title in the file.
     pub fn label(&self) -> String {
         match &self.device {
@@ -508,6 +529,17 @@ mod tests {
         assert!(Source::parse("none,mic").is_err());
         assert!(Source::parse("system,").is_err());
         assert!(Source::parse(&vec!["mic"; 1].into_iter().chain((0..8).map(|_| "x")).collect::<Vec<_>>().join(",")).is_err());
+    }
+
+    #[test]
+    fn overlay_toggles() {
+        let v = Source::parse("system:70,alsa_input.x:50").unwrap();
+        assert_eq!(Source::toggles(&v), (true, false));
+        // Turning the mic on adds it at 100 %; system keeps its 70 %.
+        assert_eq!(Source::with_toggles(v.clone(), true, true), Source::parse("system:70,alsa_input.x:50,mic").unwrap());
+        // Turning system off leaves the named device alone.
+        assert_eq!(Source::with_toggles(v.clone(), false, false), Source::parse("alsa_input.x:50").unwrap());
+        assert_eq!(Source::with_toggles(Vec::new(), false, false), Vec::new());
     }
 
     #[test]

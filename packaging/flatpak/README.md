@@ -79,6 +79,14 @@ screencast, like wlroots capture, aren't reachable from the sandbox), so the
 portal's dialog appears the first time; on X11, and under `clipt-launch` on
 wlroots, it records as a native install does.
 
+Sound (`--audio`) goes through `--socket=pulseaudio`, the sound server's
+usual permission, so the sandbox sees the host's devices as a native install
+does (`clipt list sound`). Its ffmpeg also has the PCM decoder, the AAC
+encoder, swresample and the `aresample`, `amix`, `asplit`, `volume` and
+`anullsrc` filters (0.9 MB more). Tested by recording a tone from a
+temporary null sink on the host through `clipt-launch` against headless
+Sway.
+
 ## Flatpak-specific code
 
 - `update::flatpak()` detects the sandbox (`/.flatpak-info`).

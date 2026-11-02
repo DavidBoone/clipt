@@ -64,6 +64,10 @@ Open the selection overlay in record mode: drag an area, or click a window
 or screen, then press \fBEnter\fR to start.
 On wlroots compositors a red frame outside the recorded area marks it; the
 frame is not in the video.
+The toolbar's speaker and microphone buttons (\fBS\fR and \fBM\fR) turn
+the computer's sound and the microphone on or off for this recording; they
+start from \fB\-\-audio\fR or \fBrecord_audio\fR, and other sources listed
+there are kept.
 The recording is saved in \fBvideo_dir\fR by default.
 \fBrecord region\fR is accepted as a synonym for plain \fBrecord\fR.
 .TP
@@ -98,8 +102,10 @@ Pause a running recording, or resume it if it is already paused.
 Sit in the system tray (StatusNotifierItem).
 While idle, left-click captures a region and middle-click copies the whole
 desktop; while recording, clicking the icon stops the recording.
-The right-click menu has a 3-second-delay capture, recording controls, the
-screenshots and recordings folders, an update check, and Quit.
+The right-click menu has a 3-second-delay capture, recording controls, a
+\fIRecord sound\fR checkbox (ticked when \fBrecord_audio\fR names sources;
+unticked records without sound), the screenshots and recordings folders, an
+update check, and Quit.
 Each capture runs as a fresh clipt process.
 .TP
 \fBupdate\fR [\fB\-\-check\fR]
@@ -211,6 +217,9 @@ Undo and redo.
 .TP
 \fBEsc\fR, right-click
 Cancel with \fBEsc\fR; right-click backs out a step.
+.TP
+\fBS\fR, \fBM\fR (record mode)
+Turn the computer's sound and the microphone on or off for this recording.
 .SH CONFIGURATION
 Settings live in \fIconfig.toml\fR under \fI$XDG_CONFIG_HOME/clipt\fR
 (\fI~/.config/clipt\fR when \fBXDG_CONFIG_HOME\fR is unset).

@@ -18,6 +18,11 @@ All notable changes are listed here. The format follows
   `record_separate_audio`) also keeps each source as its own track, at the
   volume it was recorded, to rebalance later. `clipt list sound` lists the
   devices and marks what `system` and `mic` stand for.
+- Sound controls: in `clipt record`'s overlay, speaker and microphone
+  buttons (or **S** and **M**) turn the computer's sound and the microphone
+  on or off for that recording; the tray menu has a *Record sound*
+  checkbox.
+- The Flatpak records sound too.
 
 ### Fixed
 - The man page and the shell completions were missing `--gif` and
