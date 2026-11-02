@@ -101,9 +101,14 @@ window with that app id. The Flatpak records too, with its own ffmpeg (see
 
 Before you select anything, clipt highlights what a click would take: the
 window under the pointer (KDE, Sway, Hyprland and X11), or the whole screen
-over bare desktop. **Tab** switches between the window and its screen. On
-GNOME, which doesn't let other apps see window positions, the highlight is
-always the screen.
+over bare desktop. **Tab** switches between the window and its screen.
+GNOME doesn't let other apps see window positions, so there the highlight
+is always the screen, unless you install clipt's small GNOME Shell
+extension, which tells clipt alone where windows are:
+
+```
+clipt gnome-extension    # install and enable it; log out and back in once
+```
 
 Editor: drag to select (click = the highlighted window or screen), drag handles to resize, drag
 inside to move. Tools: **V** select, **R** rectangle, **E** ellipse, **A**

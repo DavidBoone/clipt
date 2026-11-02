@@ -6,6 +6,12 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Window highlighting on GNOME, through an optional GNOME Shell extension
+  (`clipt gnome-extension` installs it; it answers only clipt). GNOME
+  doesn't tell applications where windows are, so without it the overlay
+  still highlights whole monitors there.
+
 ### Fixed
 - Pasting a screenshot into Chromium-based apps (Edge, Teams, Chrome)
   could give only the top of the image, grey below: those apps hand over a

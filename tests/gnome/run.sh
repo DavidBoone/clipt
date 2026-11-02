@@ -20,6 +20,11 @@ ln -sf /clipt /usr/local/bin/clipt; cp /clipt.desktop /usr/share/applications/
 pipewire >/tmp/pw.log 2>&1 & sleep 0.5; wireplumber >/tmp/wp.log 2>&1 &
 MON="--virtual-monitor 1280x720"
 [ "$LAYOUT" = dual ] && MON="$MON --virtual-monitor 1920x1080"
+# clipt's GNOME Shell extension, for the window list. Settings go to a file:
+# without dconf in the container GNOME Shell couldn't keep it enabled.
+clipt gnome-extension >/dev/null
+export GSETTINGS_BACKEND=keyfile
+gsettings set org.gnome.shell enabled-extensions "['clipt-windows@jasondyck.github.io']"
 gnome-shell --headless --wayland --no-x11 $MON >/tmp/gs.log 2>&1 &
 for _ in $(seq 100); do [ -S $XDG_RUNTIME_DIR/wayland-0 ] && break; sleep 0.1; done
 sleep 4
@@ -64,6 +69,20 @@ fi
 grep -E "encoder:|recorded" /tmp/rec.err | sed 's/^clipt: /  /'
 clipt record -g "100,50 301x200" -o /tmp/rec-g.mp4 2>/tmp/rec.err & rp=$!; sleep 1.5; clipt record --stop; wait $rp
 check "record -g records the area (302x200, got $(vsize /tmp/rec-g.mp4))" '[ "$(vsize /tmp/rec-g.mp4)" = 302x200 ]'
+
+echo "-- window list (clipt's GNOME Shell extension)"
+check "the extension is active ($(gnome-extensions info clipt-windows@jasondyck.github.io | sed -n 's/^ *State: //p'))" \
+  'gnome-extensions info clipt-windows@jasondyck.github.io | grep -q "State: ACTIVE"'
+if [ -x /testwin ]; then
+  /testwin 20c040 400 300 & tw=$!; sleep 1.5
+  out=$(gdbus call --session --dest io.github.jasondyck.clipt.Windows --object-path /io/github/jasondyck/clipt/Windows \
+    --method io.github.jasondyck.clipt.Windows.List 2>&1)
+  check "it answers only clipt (${out##*: })" 'echo "$out" | grep -q AccessDenied'
+  CLIPT_DEBUG=1 clipt record window clipt-testwin -o /tmp/rec-w.mp4 2>/tmp/rec.err & rp=$!; sleep 1.5; clipt record --stop; wait $rp
+  check "clipt finds the window through it and records it (400x300, got $(vsize /tmp/rec-w.mp4))" '[ "$(vsize /tmp/rec-w.mp4)" = 400x300 ]'
+  grep -E "clipt:   " /tmp/rec.err | head -3 | sed 's/^clipt: /  /'
+  kill $tw 2>/dev/null
+fi
 
 mkfifo /tmp/rin; python3 /rdinput.py < /tmp/rin 2>/tmp/rd.err & exec 3>/tmp/rin
 
