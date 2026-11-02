@@ -294,8 +294,8 @@ impl Sound {
         self.balance == Balance::Smart && self.ducking().is_some()
     }
 
-    /// The second output, to clipt's pipe: the voice and each other source
-    /// as they go into the mix, mono, 48 kHz floats, voice first.
+    /// The output to clipt's pipe: the voice and each other source as they
+    /// go into the mix, mono, 48 kHz floats, voice first.
     fn analysis_args(&self) -> Vec<String> {
         if !self.analyses() {
             return Vec::new();
@@ -303,29 +303,79 @@ impl Sound {
         ["-map", "[ana]", "-c:a", "pcm_f32le", "-f", "f32le", "pipe:1"].map(String::from).to_vec()
     }
 
+    /// The output that keeps each source as recorded, losslessly, for the
+    /// re-mix: `[t{i}]`, or `[r{i}]` when separate tracks also want them.
+    fn kept_args(&self, kept: &Path) -> Vec<std::ffi::OsString> {
+        if !self.analyses() {
+            return Vec::new();
+        }
+        let n = self.volumes.len();
+        let label = if self.separate && n > 1 { "r" } else { "t" };
+        let mut a: Vec<std::ffi::OsString> = Vec::new();
+        for i in 0..n {
+            a.extend(["-map".into(), format!("[{label}{i}]").into()]);
+        }
+        a.extend(["-c:a", "flac", "-f", "matroska"].map(Into::into));
+        a.push(kept.into());
+        a
+    }
+
+    /// The same sound with every source but the voice `down` dB quieter.
+    fn quieter(&self, down: f32) -> Sound {
+        let voice = self.ducking();
+        let g = 10f32.powf(-down / 20.0);
+        Sound {
+            volumes: self.volumes.iter().enumerate().map(|(i, &v)| if Some(i) == voice { v } else { v * g }).collect(),
+            labels: self.labels.clone(),
+            separate: self.separate,
+            voice: self.voice,
+            balance: self.balance,
+        }
+    }
+
     /// ffmpeg arguments: the filter graph, the outputs to map after the video,
     /// and their names. MP4 and MOV keep a track's name as its handler name
     /// (what players show); Matroska as its title.
     fn args(&self, mov: bool) -> Vec<String> {
-        let name = if mov { "handler_name" } else { "title" };
-        let n = self.volumes.len();
-        let separate = self.separate && n > 1;
         let duck = self.ducking();
         if self.balance != Balance::Off && duck.is_none() {
             eprintln!("clipt: audio balance: no microphone to duck under");
         }
+        self.graph_args(0, mov, self.analyses())
+    }
+
+    /// The arguments for sound read from input `input`; `keep` also sends
+    /// each source as recorded to `[r{i}]`, for the sound file `smart`
+    /// re-mixes from.
+    fn graph_args(&self, input: usize, mov: bool, keep: bool) -> Vec<String> {
+        let name = if mov { "handler_name" } else { "title" };
+        let n = self.volumes.len();
+        let separate = self.separate && n > 1;
+        let duck = self.ducking();
+        // Each source as recorded, `[t{i}]`, for separate tracks, the kept
+        // sound, or both.
+        let raw = separate || keep;
         let mut graph = Vec::new();
         if let Some(voice) = duck {
-            self.duck_graph(voice, separate, &mut graph);
+            self.duck_graph(input, voice, raw, &mut graph);
         } else {
             for (i, &v) in self.volumes.iter().enumerate() {
-                graph.push(if separate {
-                    format!("[0:a:{i}]{RESAMPLE},asplit=2[m{i}][t{i}];[m{i}]volume={v}[v{i}]")
+                graph.push(if raw {
+                    format!("[{input}:a:{i}]{RESAMPLE},asplit=2[m{i}][t{i}];[m{i}]volume={v}[v{i}]")
                 } else {
-                    format!("[0:a:{i}]{RESAMPLE}{}[v{i}]", volume_arg(v))
+                    format!("[{input}:a:{i}]{RESAMPLE}{}[v{i}]", volume_arg(v))
                 });
             }
         }
+        // With both, the sources as recorded are split again.
+        let track = if separate && keep {
+            for i in 0..n {
+                graph.push(format!("[t{i}]asplit=2[s{i}][r{i}]"));
+            }
+            "s"
+        } else {
+            "t"
+        };
         // For `smart`, each input to the mix is also sent back to clipt.
         let into_mix = if let Some(voice) = duck.filter(|_| self.analyses()) {
             let order = std::iter::once(voice).chain((0..n).filter(|&i| i != voice));
@@ -351,7 +401,7 @@ impl Sound {
         a.extend(["-metadata:s:a:0".into(), format!("{name}={first}")]);
         if separate {
             for (i, label) in self.labels.iter().enumerate() {
-                a.extend(["-map".into(), format!("[t{i}]"), format!("-metadata:s:a:{}", i + 1), format!("{name}={label}")]);
+                a.extend(["-map".into(), format!("[{track}{i}]"), format!("-metadata:s:a:{}", i + 1), format!("{name}={label}")]);
             }
         }
         a.extend(AAC.iter().map(|s| s.to_string()));
@@ -361,15 +411,15 @@ impl Sound {
     /// The `duck` graph: the microphone through the clean-up chain, feeding
     /// both the mix and the ducking keys; every other source, after its
     /// volume, is sidechained to the voice.
-    fn duck_graph(&self, voice: usize, separate: bool, graph: &mut Vec<String>) {
+    fn duck_graph(&self, input: usize, voice: usize, separate: bool, graph: &mut Vec<String>) {
         let others: Vec<usize> = (0..self.volumes.len()).filter(|&i| i != voice).collect();
         // The clean voice is split into the mix and the keys. One key is
         // named directly; several need a second split.
         let key = if others.len() == 1 { format!("[k{}]", others[0]) } else { "[key]".to_string() };
         graph.push(if separate {
-            format!("[0:a:{voice}]{RESAMPLE},asplit=2[wet{voice}][t{voice}]")
+            format!("[{input}:a:{voice}]{RESAMPLE},asplit=2[wet{voice}][t{voice}]")
         } else {
-            format!("[0:a:{voice}]{RESAMPLE}[wet{voice}]")
+            format!("[{input}:a:{voice}]{RESAMPLE}[wet{voice}]")
         });
         graph.push(clean_voice(voice, &format!("[m{voice}]{key}")));
         graph.push(format!("[m{voice}]anull{}[v{voice}]", volume_arg(self.volumes[voice])));
@@ -380,9 +430,9 @@ impl Sound {
         for &i in &others {
             let v = self.volumes[i];
             graph.push(if separate {
-                format!("[0:a:{i}]{RESAMPLE},asplit=2[m{i}][t{i}];[m{i}]volume={v}[w{i}]")
+                format!("[{input}:a:{i}]{RESAMPLE},asplit=2[m{i}][t{i}];[m{i}]volume={v}[w{i}]")
             } else {
-                format!("[0:a:{i}]{RESAMPLE}{}[w{i}]", volume_arg(v))
+                format!("[{input}:a:{i}]{RESAMPLE}{}[w{i}]", volume_arg(v))
             });
             graph.push(format!("[w{i}][k{i}]{DUCK}[v{i}]"));
         }
@@ -426,6 +476,7 @@ impl Encoder {
         let analyses = sound.is_some_and(Sound::analyses);
         if let Some(s) = sound {
             cmd.args(s.analysis_args());
+            cmd.args(s.kept_args(&kept_path(path)));
         }
         // Its own process group: Ctrl-C in the terminal reaches only clipt,
         // which then closes ffmpeg's input so it can finish the file.
@@ -494,6 +545,63 @@ impl Encoder {
         let s = s.trim();
         if s.is_empty() { "no error output".into() } else { s.lines().last().unwrap_or(s).to_string() }
     }
+}
+
+/// Where `smart` keeps the sound as recorded, for the re-mix: beside the
+/// video, so it's on the same disk and the re-mixed file can replace it.
+pub fn kept_path(video: &Path) -> std::path::PathBuf {
+    let name = video.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    video.with_file_name(format!(".{name}.clipt-sound.mka"))
+}
+
+/// Mix the sound of `video` again from the sound kept beside it, with every
+/// source but the voice `down` dB quieter: the video is copied, the mix
+/// (and any separate tracks) encoded again from the kept sound, and the
+/// result measured as the recording was. Replaces `video` only once ffmpeg
+/// has finished; killed and reported if it takes longer than `duration`
+/// suggests.
+pub fn remix(sound: &Sound, video: &Path, down: f32, duration: Duration) -> Result<Option<super::clarity::Report>> {
+    let kept = kept_path(video);
+    let name = video.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let out = video.with_file_name(format!(".{name}.clipt-remix.{}", video.extension().and_then(|e| e.to_str()).unwrap_or("mp4")));
+    let mov = matches!(video.extension().and_then(|e| e.to_str()), Some("mp4" | "mov"));
+    let quieter = sound.quieter(down);
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-i"]).arg(video).arg("-i").arg(&kept);
+    cmd.args(quieter.graph_args(1, mov, false)).args(["-c:v", "copy"]);
+    if mov {
+        cmd.args(["-movflags", "+faststart"]);
+    }
+    cmd.arg(&out).args(quieter.analysis_args());
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("starting ffmpeg")?;
+    let clarity = child.stdout.take().map(|o| measure(o, sound.volumes.len()));
+    let mut err = child.stderr.take().unwrap();
+    let stderr = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = err.read_to_string(&mut s);
+        s
+    });
+    // Sound only, so much faster than real time; this is generous.
+    let limit = Duration::from_secs(60) + duration / 2;
+    let status = wait_up_to(&mut child, limit)?;
+    if status.is_none() {
+        kill(&mut child);
+    }
+    let stderr = stderr.join().unwrap_or_default();
+    let report = clarity.and_then(|h| h.join().ok()).flatten();
+    match status {
+        Some(s) if s.success() => {}
+        Some(s) => {
+            let _ = std::fs::remove_file(&out);
+            bail!("re-mixing failed ({s}): {}", stderr.trim().lines().last().unwrap_or("no error output"));
+        }
+        None => {
+            let _ = std::fs::remove_file(&out);
+            bail!("re-mixing didn't finish within {limit:?}, so it was stopped");
+        }
+    }
+    std::fs::rename(&out, video).context("replacing the recording with the re-mix")?;
+    Ok(report)
 }
 
 /// Read what ffmpeg sends back for `smart` and measure it. The reading
@@ -777,9 +885,24 @@ mod tests {
         assert_eq!(Balance::parse("duck").unwrap(), Balance::Duck);
         assert_eq!(Balance::parse("smart").unwrap(), Balance::Smart);
         assert!(Balance::parse("loud").is_err());
-        // `smart` is `duck` with each input to the mix also sent back.
+        // `smart` is `duck` with each input to the mix also sent back, and
+        // the sources as recorded kept, as for separate tracks.
         let smart = s(&[0.7, 1.0], false, Some(1), Balance::Smart);
-        assert!(graph(&smart).starts_with(&graph(&duck).replace(&format!(";[v0][v1]{MIX}:inputs=2[mix]"), "")), "{}", graph(&smart));
+        assert!(graph(&smart).starts_with(&graph(&sep).replace(&format!(";[v0][v1]{MIX}:inputs=2[mix]"), "")), "{}", graph(&smart));
+        assert_eq!(maps(&smart), ["0:v", "[mix]"], "kept, not as tracks");
+        let kept = |s: &Sound| s.kept_args(Path::new("k.mka")).iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert_eq!(kept(&smart), ["-map", "[t0]", "-map", "[t1]", "-c:a", "flac", "-f", "matroska", "k.mka"]);
+        // With separate tracks as well, each source is split for both.
+        let smart_sep = s(&[0.7, 1.0], true, Some(1), Balance::Smart);
+        assert!(graph(&smart_sep).contains("[t0]asplit=2[s0][r0];[t1]asplit=2[s1][r1]"), "{}", graph(&smart_sep));
+        assert_eq!(maps(&smart_sep), ["0:v", "[mix]", "[s0]", "[s1]"]);
+        assert_eq!(kept(&smart_sep)[..4], ["-map", "[r0]", "-map", "[r1]"]);
+        assert!(kept(&duck).is_empty());
+        // The re-mix reads the kept sound (input 1), the others turned down.
+        let down = smart.quieter(6.0);
+        assert!((down.volumes[0] - 0.7 * 0.501).abs() < 0.001 && down.volumes[1] == 1.0, "{:?}", down.volumes);
+        let remix = down.graph_args(1, false, false)[1].clone();
+        assert!(remix.starts_with("[1:a:1]") && remix.contains("[1:a:0]") && !remix.contains("[0:a:"), "{remix}");
         assert!(graph(&smart).ends_with(&format!("[z0][z1]amerge=inputs=2,aformat=sample_fmts=flt[ana];[u0][u1]{MIX}:inputs=2[mix]")));
         assert!(graph(&smart).contains("[v1]asplit=2[u1][y1];[y1]pan=mono|c0=0.5*c0+0.5*c1[z0]"), "the voice comes first");
         assert_eq!(smart.analysis_args(), ["-map", "[ana]", "-c:a", "pcm_f32le", "-f", "f32le", "pipe:1"]);
@@ -867,6 +990,7 @@ mod tests {
             .args(["-c:v", "rawvideo"])
             .arg(dir.join("out.mkv"))
             .args(smart.analysis_args())
+            .args(smart.kept_args(&dir.join("kept.mka")))
             .stdin(Stdio::null())
             .output()
             .unwrap();
@@ -881,6 +1005,72 @@ mod tests {
         // 20 dB under: clear.
         use super::super::clarity::{Leak, Report};
         assert!(matches!(r, Report::Measured { clarity, leak: Leak::NotHeard, .. } if clarity > 0.9), "{r:?}");
+    }
+
+    /// A voice under a bed 10 dB louder: `smart` measures it below the
+    /// target and says how much quieter the bed should be; the re-mix at that
+    /// reaches the target, keeps the video, and replaces the file.
+    #[test]
+    fn smart_remix_reaches_the_target() {
+        let _ffmpeg = FFMPEG.lock().unwrap_or_else(|e| e.into_inner());
+        if Command::new("ffmpeg").arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_err() {
+            return;
+        }
+        use super::super::clarity::{Analyzer, Report};
+        let dir = std::env::temp_dir().join(format!("clipt-remix-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("in.mkv");
+        let made = Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:s=64x64:d=12"])
+            .args(["-f", "lavfi", "-i", "anoisesrc=c=pink:a=0.6:d=12:r=48000"])
+            .args(["-f", "lavfi", "-i", "anoisesrc=c=pink:a=0.2:d=12:r=48000:seed=7"])
+            .args(["-filter_complex", "[2:a]volume='if(lt(mod(t,4),2.8),if(lt(mod(t,0.4),0.25),1,0.3),0)':eval=frame[mic]"])
+            .args(["-map", "0:v", "-map", "1:a", "-map", "[mic]", "-ac", "2", "-c:v", "rawvideo", "-c:a", "pcm_s16le"])
+            .arg(&input)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let smart = Sound {
+            volumes: vec![1.0, 1.0],
+            labels: vec!["System".into(), "Microphone".into()],
+            separate: true,
+            voice: Some(1),
+            balance: Balance::Smart,
+        };
+        // As Encoder::spawn runs it: the video, the measurement, the kept sound.
+        let video = dir.join("out.mkv");
+        let out = Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+            .arg(&input)
+            .args(smart.args(false))
+            .args(["-c:v", "rawvideo"])
+            .arg(&video)
+            .args(smart.analysis_args())
+            .args(smart.kept_args(&kept_path(&video)))
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let samples: Vec<f32> = out.stdout.as_chunks::<4>().0.iter().map(|&b| f32::from_le_bytes(b)).collect();
+        let mut a = Analyzer::new(2);
+        a.push(&samples);
+        let before = a.report().unwrap();
+        let Report::Measured { clarity, quieter: Some((down, _)), .. } = before else { panic!("{before:?}") };
+        assert!(clarity < 0.75, "{before:?}");
+        let after = remix(&smart, &video, down, Duration::from_secs(12));
+        let streams = Command::new("ffprobe")
+            .args(["-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0"])
+            .arg(&video)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let after = after.unwrap().unwrap();
+        assert!(matches!(after, Report::Measured { clarity, .. } if clarity >= 0.75), "{before:?} -> {after:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&streams.stdout).lines().collect::<Vec<_>>(),
+            ["video", "audio", "audio", "audio"],
+            "video, mix, two tracks"
+        );
     }
 
     #[test]

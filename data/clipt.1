@@ -169,9 +169,13 @@ compression, de-essing, a 3 kHz presence boost) in the mix only, and the
 other sources dip while the voice speaks.
 \fBsmart\fR does the same and, at the stop, says how clearly the voice
 came through: its speech clarity (the Speech Intelligibility Index of its
-quietest moments, 0.75 or more is good) and, below that, how much quieter
-the other sound should be; or, when the microphone also hears the
-speakers, how far the voice is over the rest.
+quietest moments, 0.75 or more is good).
+Below that, if turning the other sound down helps, it mixes the sound
+again from what it kept as recorded, with the other sources as much
+quieter as that needs (at most 20 dB), copying the video; while recording, that kept sound is a hidden FLAC file beside
+the video, removed at the end.
+When the microphone also hears the speakers, it instead says how far the
+voice is over the rest, and leaves the mix as it is.
 Needs the microphone and at least one other source; otherwise it changes
 nothing and says so.
 Overrides \fBrecord_audio_balance\fR.
