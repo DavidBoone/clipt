@@ -20,7 +20,8 @@ itself, and captures use the compositor's own protocols.
 .PP
 On Wayland the capture backend is chosen automatically: ext-image-copy-capture
 or wlr-screencopy on wlroots compositors, KWin's ScreenShot2 interface on KDE
-Plasma, and xdg-desktop-portal on GNOME.
+Plasma, and Mutter's ScreenCast on GNOME, with xdg-desktop-portal for any
+monitor that can't be captured that way and on other desktops.
 On X11 it uses GetImage (RandR/Xinerama monitors) and supports INCR, so
 large images paste into any application.
 Every output gets its own overlay at its native resolution, so mixed
@@ -137,8 +138,8 @@ Wait \fISECS\fR seconds before capturing or recording.
 Fractional seconds are accepted.
 .TP
 \fB\-b\fR, \fB\-\-backend\fR \fINAME\fR
-Force a capture backend: \fBext\fR, \fBwlr\fR, \fBkwin\fR, \fBportal\fR or
-\fBx11\fR.
+Force a capture backend: \fBext\fR, \fBwlr\fR, \fBkwin\fR, \fBmutter\fR,
+\fBportal\fR or \fBx11\fR.
 .TP
 \fB\-\-cursor\fR
 Include the mouse pointer in the capture, where the backend supports it.
@@ -264,7 +265,7 @@ Show a desktop notification after saving or copying.
 .TP
 \fBbackend\fR = \fI"auto"\fR
 Capture backend: \fBauto\fR, \fBext\fR, \fBwlr\fR, \fBkwin\fR,
-\fBportal\fR or \fBx11\fR.
+\fBmutter\fR, \fBportal\fR or \fBx11\fR.
 .TP
 \fBcursor\fR = \fIfalse\fR
 Include the mouse pointer in captures, where the backend supports it.

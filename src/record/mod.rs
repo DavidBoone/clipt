@@ -532,11 +532,16 @@ fn pick_method(wl: &Wayland, wlroots: &[Protocol], forced: Option<Backend>) -> R
             Method::Kde
         }
         #[cfg(feature = "pipewire")]
+        Some(Backend::Mutter) => {
+            anyhow::ensure!(gnome(), "Mutter's screencast isn't available here");
+            Method::Gnome
+        }
+        #[cfg(feature = "pipewire")]
         Some(Backend::Portal) => {
             anyhow::ensure!(portal(), "the ScreenCast portal isn't available here");
             Method::Portal
         }
-        Some(b) => bail!("recording doesn't support the {b:?} backend (ext, wlr, kwin or portal)"),
+        Some(b) => bail!("recording doesn't support the {b:?} backend (ext, wlr, kwin, mutter or portal)"),
         None if ext => Method::Wlroots(Protocol::ExtImageCopy),
         None if !wlroots.is_empty() => Method::Wlroots(Protocol::WlrScreencopy),
         #[cfg(feature = "pipewire")]

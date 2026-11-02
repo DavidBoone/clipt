@@ -5,6 +5,7 @@
 //! | `ext`    | ext-image-copy-capture-v1: Sway 1.11+, niri, COSMIC, Hyprland 0.50+ |
 //! | `wlr`    | wlr-screencopy: Sway, Hyprland, river, labwc, Wayfire |
 //! | `kwin`   | KDE Plasma (org.kde.KWin.ScreenShot2)                |
+//! | `mutter` | GNOME (org.gnome.Mutter.ScreenCast, over PipeWire)   |
 //! | `portal` | GNOME and anything with xdg-desktop-portal           |
 //! | `x11`    | X11 sessions (Xfce, Cinnamon, MATE, i3, ...)         |
 
@@ -77,6 +78,7 @@ pub enum Backend {
     Ext,
     Wlr,
     Kwin,
+    Mutter,
     Portal,
     X11,
 }
@@ -99,9 +101,10 @@ impl Backend {
             "ext" => Self::Ext,
             "wlr" => Self::Wlr,
             "kwin" => Self::Kwin,
+            "mutter" => Self::Mutter,
             "portal" => Self::Portal,
             "x11" => Self::X11,
-            _ => bail!("unknown backend '{s}' (ext, wlr, kwin, portal, x11)"),
+            _ => bail!("unknown backend '{s}' (ext, wlr, kwin, mutter, portal, x11)"),
         })
     }
 }
@@ -164,6 +167,13 @@ impl Capturer {
             if kwin::available(bus) {
                 v.push(Backend::Kwin);
             }
+            // Ahead of the portal: no flash and no PNG round trip. Needs
+            // libpipewire, which GNOME always has; if it's missing, the
+            // capture fails and the portal is tried next.
+            #[cfg(feature = "pipewire")]
+            if mutter_cast::available(bus) {
+                v.push(Backend::Mutter);
+            }
             if portal::available(bus) {
                 v.push(Backend::Portal);
             }
@@ -193,6 +203,12 @@ impl Capturer {
                     Some(bus) => kwin::capture(bus, outputs, cursor),
                     None => Err(anyhow::anyhow!("no session bus")),
                 },
+                #[cfg(feature = "pipewire")]
+                (Backend::Mutter, _) => {
+                    mutter_cast::capture(outputs, cursor).and_then(|shots| portal_for_missing(self.bus.as_ref(), &all, outputs, shots))
+                }
+                #[cfg(not(feature = "pipewire"))]
+                (Backend::Mutter, _) => Err(anyhow::anyhow!("this clipt was built without PipeWire")),
                 (Backend::Portal, _) => match &self.bus {
                     Some(bus) => portal::capture(bus, &all, outputs),
                     None => Err(anyhow::anyhow!("no session bus")),
@@ -210,4 +226,27 @@ impl Capturer {
         }
         bail!("all capture backends failed:\n  {}", errors.join("\n  "))
     }
+}
+
+/// Mutter's shots, with any monitor it sent nothing for (see
+/// `mutter_cast::capture`) taken from the screenshot portal instead.
+#[cfg(feature = "pipewire")]
+fn portal_for_missing(
+    bus: Option<&crate::dbus::Connection>,
+    all: &[Output],
+    outputs: &[Output],
+    shots: Vec<Option<Shot>>,
+) -> Result<Vec<Shot>> {
+    use anyhow::Context;
+    let missing: Vec<Output> = outputs.iter().zip(&shots).filter(|(_, s)| s.is_none()).map(|(o, _)| o.clone()).collect();
+    if missing.is_empty() {
+        return Ok(shots.into_iter().flatten().collect());
+    }
+    if std::env::var_os("CLIPT_DEBUG").is_some() {
+        let names: Vec<_> = missing.iter().map(|o| o.name.as_str()).collect();
+        eprintln!("clipt: no frame from Mutter for {}; asking the portal", names.join(", "));
+    }
+    let bus = bus.context("Mutter sent no frame, and there's no session bus for the portal")?;
+    let mut rest = portal::capture(bus, all, &missing)?.into_iter();
+    shots.into_iter().map(|s| s.or_else(|| rest.next())).collect::<Option<Vec<_>>>().context("the portal returned too few monitors")
 }

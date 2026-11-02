@@ -7,6 +7,12 @@ All notable changes are listed here. The format follows
 ## [Unreleased]
 
 ### Added
+- GNOME screenshots come from Mutter's ScreenCast (`-b mutter`) instead of
+  the screenshot portal: no white flash, no PNG written to ~/Pictures and
+  read back, and each monitor at its own resolution rather than the whole
+  desktop at the highest monitor scale, so the overlay opens several times
+  sooner on multi-monitor desktops with mixed scaling. A monitor Mutter
+  sends nothing for within half a second still comes from the portal.
 - `clipt record --audio-balance=duck` (or `record_audio_balance = "duck"`)
   ducks the other sound under the microphone: the microphone's sound is
   cleaned up in the mix, and the other sources dip by about 11 dB while the
