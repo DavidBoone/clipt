@@ -195,7 +195,7 @@ toolbar rendered and looked at, and a tone recorded through the Flatpak.
 
 **4. Smart balance (proposed).** Keeping a voice intelligible over the
 desktop's sound, from the voice-over-music rules below. Starts with a
-spike.
+spike, part done (voice detection, YAMNet licence).
 
 ## Smart balance (phase 4)
 
@@ -219,15 +219,17 @@ To settle first:
   meaningless and would drag the 10th percentile down, so the measurement
   needs voice activity detection on the voice (see below).
 - **Speakers spoil it.** Through speakers the microphone also hears the
-  desktop, so its track looks clearer than it is and SII reads high.
-  Headphones keep it honest; clipt could say so when it can't tell.
+  desktop, so its track looks clearer than it is and SII reads high, and
+  (the research found) voice detection then counts music as speech too.
+  Headphones keep it honest; see *Leakage* below for how clipt can tell.
 - **SII treats music as steady noise.** Judging the 10th percentile helps;
   the broadband rules of thumb (other sound 15 dB under the voice, 20 dB
   if it has singing or talking, 10–12 dB with the dynamic EQ) are the
   sanity check.
 - **Testing needs speech-like sound.** Steady tones won't trigger ducking
   the way speech does; speech-shaped, syllable-rate modulated noise can
-  stand in for a voice in the e2e tests.
+  stand in for a voice in the e2e tests. Add music under the voice source,
+  and a music-only voice source, so the tests cover leakage too.
 
 ### Telling what's playing
 
@@ -244,8 +246,27 @@ is needed either):
   noise suppression. Silero VAD is more accurate but needs ONNX Runtime (a
   native library few have) or tract (megabytes more); webrtc-vad compiles
   C into the binary (harder for the cross-compiled release targets) and is
-  weaker against background noise. A separate, mostly clean voice source
-  should be within nnnoiseless's reach; the spike checks it.
+  weaker against background noise.
+
+  Measured ([audio-phase4-research.md](audio-phase4-research.md)): on a
+  clean voice source it's a good speech-versus-silence gate (AUC 0.98;
+  threshold 0.5 with 100 ms smoothing keeps 73 % of speech frames and
+  passes 2.6 % of pauses; a 200 ms hangover at 0.7 reaches 92 % with 10 %).
+  It is not a speech-versus-music detector: against music with vocals,
+  instrumental music and noise its AUC is 0.2–0.66, no threshold separates
+  them, and reference RNNoise does no better. CPU: under 0.5 % of a core.
+  **Decision:** nnnoiseless gates speech on a voice source known to be
+  clean; *Leakage* decides whether it is.
+- **Leakage: does the voice source hear the other sources?** clipt has
+  both streams, so it can tell: correlate the voice source against each
+  other source over a few seconds, at lags up to ~200 ms (the speakers'
+  and room's delay). The same music in both means the microphone hears
+  the speakers. Cheap (a few seconds of decimated audio, every few
+  seconds). With leakage, `smart` says so at stop ("the microphone hears
+  the speakers; headphones give a reliable result") and falls back to the
+  broadband rules rather than report an SII it can't trust. YAMNet's
+  speech score on the voice source is the stronger second discriminator,
+  if the background model is built anyway.
 - **What is the rest: music with vocals, instrumental music, or noise?**
   It picks the target in the broadband rule: 20 dB under the voice for
   singing or other talkers (competing speech masks beyond its energy,
@@ -263,7 +284,16 @@ is needed either):
      windows every 0.48 s at 16 kHz, so this path does resample (`rubato`
      or a simple polyphase filter), on one thread, loaded before recording
      starts. The Flatpak has no network access, so it would ship the
-     model. The licence of the ONNX export's weights needs checking.
+     model, fetched at build time and checked by hash.
+
+     Licence (checked in the research): the ONNX export and Google's
+     original are both Apache-2.0, so clipt can download and the Flatpak
+     can ship it, with the licence and attribution. The export's source
+     archive hash matches Google's; the export is 16,093,355 bytes,
+     SHA-256 `d3835ffb…8f908e` (in full in the research). The class names
+     are AudioSet's, CC BY-SA 4.0, so clipt hard-codes the few class
+     indices it needs (Speech 0, Conversation 2, Narration 3, Singing 24,
+     Choir 25, Music 132, Vocal music 249, …) rather than ship the CSV.
 
 Libraries, if the measurement moves into clipt: the octave-band filters
 are a few biquads, about 30 lines, so written here rather than a crate
@@ -277,15 +307,19 @@ No lock-free ring buffer either: sound is read with blocking reads on its
 own thread, not in a real-time callback.
 
 Spike:
-- A recording of speech over music, mixed plain, ducked, and ducked with
-  the dynamic EQ; SII at the 10th percentile for each, against the targets
-  and the rules of thumb. It decides whether the at-stop fix is needed or
-  ducking alone gets there, and settles the ducking settings.
-- nnnoiseless on a real voice track, with pauses and some background
-  noise: how well its voice probability marks speech, and CPU per 20 ms.
-- YAMNet through tract on music with and without vocals, and on noise:
-  how often it's right after smoothing, CPU per window, the binary size
-  it adds and its load time. It decides whether the model earns its
+- Done (2026-11-02, by the superagent, PR #36): nnnoiseless as voice
+  detection, and the YAMNet weights' licence. Findings above and in
+  [audio-phase4-research.md](audio-phase4-research.md).
+- To do: a recording of speech over music, mixed plain, ducked, and
+  ducked with the dynamic EQ; SII at the 10th percentile for each, against
+  the targets and the rules of thumb. It decides whether the at-stop fix
+  is needed or ducking alone gets there, and settles the ducking settings.
+- To do: the leakage check, on the research's speech-over-music mixes
+  (−10 and −20 dB) against clean speech: does correlation tell them apart,
+  and how much of each source does it need?
+- To do: YAMNet through tract on music with and without vocals, and on
+  noise: how often it's right after smoothing, CPU per window, the binary
+  size it adds and its load time. It decides whether the model earns its
   weight over the 20 dB default.
 
 ## Spike results (2026-11-01)
