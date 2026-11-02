@@ -6,6 +6,8 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-02
+
 ### Added
 - GNOME screenshots come from Mutter's ScreenCast (`-b mutter`) instead of
   the screenshot portal: no white flash, no PNG written to ~/Pictures and
