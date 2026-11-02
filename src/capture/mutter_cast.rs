@@ -4,13 +4,13 @@
 //! it.
 
 use super::LogicalRect;
-use super::pipewire::{CropFn, Remote};
+use super::pipewire::{CropFn, DmaBufUnreadable, Remote};
 use super::{Output, PixelOrder, Shot};
 use crate::capture::VideoFrame;
 use crate::image::Image;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use zbus::{OwnedObjectPath, Variant as Value};
 
@@ -33,7 +33,7 @@ pub fn available(conn: &crate::dbus::Connection) -> bool {
 pub fn stream(target: Target, cursor: bool, crop: CropFn, sink: Box<dyn FnMut(VideoFrame) -> bool>) -> Result<()> {
     let conn = crate::dbus::session().context("connecting to the session bus")?;
     let (session, node) = start(&conn, &target, cursor)?;
-    let r = super::pipewire::stream(Remote { fd: None, node }, crop, sink);
+    let r = super::pipewire::stream(Remote { fd: None, node, linear_dmabuf: false, few_buffers: false }, crop, sink);
     stop(&conn, &session);
     r
 }
@@ -88,6 +88,25 @@ fn stop(conn: &crate::dbus::Connection, session: &OwnedObjectPath) {
     let _ = crate::dbus::call_method(conn, DEST, session.as_str(), SESSION, "Stop", &());
 }
 
+/// The sessions a screenshot started, to stop them all once it has its
+/// frames; `None` after that, so a retry starting late stops its own.
+type Sessions = Arc<Mutex<Option<Vec<OwnedObjectPath>>>>;
+
+/// Add `session` to those to stop, or stop it now if that has happened
+/// already; false then.
+fn track(conn: &crate::dbus::Connection, sessions: &Sessions, session: &OwnedObjectPath) -> bool {
+    match sessions.lock().unwrap().as_mut() {
+        Some(v) => {
+            v.push(session.clone());
+            true
+        }
+        None => {
+            stop(conn, session);
+            false
+        }
+    }
+}
+
 /// How long a screenshot waits for each monitor's first frame. It normally
 /// takes under a quarter of a second.
 const SHOT_TIMEOUT: Duration = Duration::from_millis(500);
@@ -98,19 +117,21 @@ const SHOT_TIMEOUT: Duration = Duration::from_millis(500);
 /// own resolution rather than the whole desktop at the highest scale (a 1x
 /// monitor beside a 1.5x one isn't rendered at 1.5x and shrunk back).
 ///
-/// Mutter fills shared memory only once it has painted a monitor, and a
-/// monitor it scans out directly isn't painted, so one can send nothing
-/// until its content changes. A monitor that sends nothing in time comes
-/// back as `None`, for the caller to take from somewhere else.
+/// Frames come as linear DMA-BUFs where Mutter can make them. In shared
+/// memory Mutter sends a monitor only once it has painted it, and a monitor
+/// it scans out directly isn't painted, so one could send nothing until its
+/// content changed. A monitor that still sends nothing in time comes back
+/// as `None`, for the caller to take from somewhere else.
 pub fn capture(outputs: &[Output], cursor: bool) -> Result<Vec<Option<Shot>>> {
     super::pipewire::check()?;
     let t0 = Instant::now();
     let conn = crate::dbus::session().context("connecting to the session bus")?;
-    let mut sessions = Vec::with_capacity(outputs.len());
-    let frames = first_frames(&conn, outputs, cursor, &mut sessions);
+    let sessions: Sessions = Arc::new(Mutex::new(Some(Vec::with_capacity(outputs.len()))));
+    let frames = first_frames(&conn, outputs, cursor, &sessions);
     // Stopping the sessions ends any stream still waiting for a frame, so
     // GNOME doesn't go on showing the screen as shared.
-    for s in &sessions {
+    let started = sessions.lock().unwrap().take().unwrap_or_default();
+    for s in &started {
         stop(&conn, s);
     }
     let frames = frames?;
@@ -122,31 +143,37 @@ pub fn capture(outputs: &[Output], cursor: bool) -> Result<Vec<Option<Shot>>> {
 /// Start a stream per output (recording each session in `sessions`), all
 /// before waiting on any, and wait up to `SHOT_TIMEOUT` for their first
 /// frames.
-fn first_frames(
-    conn: &crate::dbus::Connection,
-    outputs: &[Output],
-    cursor: bool,
-    sessions: &mut Vec<OwnedObjectPath>,
-) -> Result<Vec<Option<VideoFrame>>> {
+fn first_frames(conn: &crate::dbus::Connection, outputs: &[Output], cursor: bool, sessions: &Sessions) -> Result<Vec<Option<VideoFrame>>> {
     let mut starting = Vec::with_capacity(outputs.len());
     for o in outputs {
         let s = begin(conn, &Target::Monitor(o.name.clone()), cursor).with_context(|| format!("capturing {}", o.name))?;
-        sessions.push(s.session.clone());
+        track(conn, sessions, &s.session);
         starting.push(s);
     }
     let (tx, rx) = mpsc::channel();
     for (i, (o, s)) in outputs.iter().zip(starting).enumerate() {
         let node = s.node().with_context(|| format!("capturing {}", o.name))?;
-        let tx = tx.clone();
+        let (tx, conn, sessions, name) = (tx.clone(), conn.clone(), sessions.clone(), o.name.clone());
         // Detached, not scoped: a stream that never delivers must not hold
         // the screenshot up past the timeout.
         std::thread::spawn(move || {
-            let first = tx.clone();
-            let sink = Box::new(move |f: VideoFrame| {
-                let _ = first.send((i, Ok(f)));
-                false
-            });
-            if let Err(e) = super::pipewire::stream(Remote { fd: None, node }, Box::new(|_, _| None), sink) {
+            let read = |node, linear_dmabuf| {
+                let first = tx.clone();
+                let sink = Box::new(move |f: VideoFrame| {
+                    let _ = first.send((i, Ok(f)));
+                    false
+                });
+                super::pipewire::stream(Remote { fd: None, node, linear_dmabuf, few_buffers: true }, Box::new(|_, _| None), sink)
+            };
+            let mut r = read(node, true);
+            if r.as_ref().is_err_and(|e| e.is::<DmaBufUnreadable>()) {
+                debug(&format!("{name}: DMA-BUF unreadable; asking for shared memory"));
+                // On a new stream: the first one goes on sending DMA-BUFs to
+                // whoever connects.
+                r = begin(&conn, &Target::Monitor(name), cursor)
+                    .and_then(|s| if track(&conn, &sessions, &s.session) { read(s.node()?, false) } else { Ok(()) });
+            }
+            if let Err(e) = r {
                 let _ = tx.send((i, Err(e)));
             }
         });
