@@ -76,6 +76,8 @@ EDITOR KEYS:
     Shift                 square / 45°    arrows         nudge (Shift resizes)
     Enter, Ctrl+C, dbl-click  copy        Ctrl+S         save
     Ctrl+Z / Ctrl+Shift+Z undo / redo     Esc / right-click  cancel / back
+    Ctrl+R                switch between screenshot and video (or click
+                          Screenshot / Video at the bottom of the screen)
     S / M (record mode)   computer sound / microphone on or off
 
 Config: ~/.config/clipt/config.toml (save_dir, filename, color, width,
@@ -352,13 +354,18 @@ fn run() -> Result<()> {
             drop(cap);
             let wins = wins.join().unwrap_or_default();
             lap("windows");
-            gui(&cfg, &args, shots, fonts, wins, kind, &lap)
+            let mut ed = Editor::new(shots, fonts, true, cfg.color.saturating_sub(1), cfg.width);
+            ed.windows = wins;
+            gui(&cfg, &args, ed, kind, backend, &lap)
         }
         "debug-render" => {
             let (_, shots) = cap.capture(&outputs, cursor, backend)?;
             let fonts = fonts.join().map_err(|_| anyhow::anyhow!("font loader panicked"))??;
             let mut ed = Editor::new(shots, fonts, false, cfg.color.saturating_sub(1), cfg.width);
             ed.windows = windows::list(cap.kind() == capture::DisplayKind::X11);
+            // As the screenshot overlay shows it; CLIPT_RECORD=1 in record mode.
+            ed.can_switch = true;
+            ed.record = std::env::var_os("CLIPT_RECORD").is_some();
             // CLIPT_POINTER=x,y renders the hover state at that point.
             if let Some((x, y)) = std::env::var("CLIPT_POINTER").ok().and_then(|v| {
                 let (x, y) = v.split_once(',')?;
@@ -378,23 +385,28 @@ fn run() -> Result<()> {
     }
 }
 
-fn gui(
-    cfg: &Config,
-    args: &Args,
-    shots: Vec<Shot>,
-    fonts: text::Fonts,
-    wins: Vec<windows::Window>,
-    kind: capture::DisplayKind,
-    lap: &dyn Fn(&str),
-) -> Result<()> {
-    let mut ed = Editor::new(shots, fonts, true, cfg.color.saturating_sub(1), cfg.width);
-    ed.windows = wins;
+fn gui(cfg: &Config, args: &Args, mut ed: Editor, kind: capture::DisplayKind, backend: Option<Backend>, lap: &dyn Fn(&str)) -> Result<()> {
+    // It can switch to recording the selection (Ctrl+R, or its buttons),
+    // with the sound the settings would record.
+    ed.can_switch = true;
+    let audio = record::audio::Source::parse(args.audio.as_deref().unwrap_or(&cfg.record_audio)).unwrap_or_default();
+    let (system, mic) = record::audio::Source::toggles(&audio);
+    ed.sound = editor::SoundToggles { system, mic };
     lap("editor");
     let mut session = session::open(ed, kind)?;
     lap("surfaces");
     let outcome = session.run()?;
     if outcome == Outcome::Cancel {
         return Ok(());
+    }
+    if outcome == Outcome::Record {
+        let target = recording_target(session.editor())?;
+        let sound = session.editor().sound;
+        session.hide()?;
+        drop(session);
+        // Let the compositor take the overlay down before the first frame.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        return record_picked(cfg, args, target, audio, sound, args.cursor || cfg.cursor, backend);
     }
     let img = session.editor().export().context("nothing selected")?;
 
@@ -471,17 +483,53 @@ fn pick_recording_area(
     if session.run()? != Outcome::Record {
         return Ok(None);
     }
-    let r = session.editor().final_rect().context("nothing selected")?;
+    let target = recording_target(session.editor())?;
     let sound = session.editor().sound;
-    let target = match session.editor().selected_window() {
-        Some(w) => record::Target::Window(w.clone()),
-        None => record::Target::Rect((r.left() as f64, r.top() as f64, r.width() as f64, r.height() as f64)),
-    };
     session.hide()?;
     drop(session);
     // Let the compositor take the overlay down before the first frame.
     std::thread::sleep(std::time::Duration::from_millis(150));
     Ok(Some((target, sound)))
+}
+
+/// What a record-mode overlay picked: the window clicked, or the area.
+fn recording_target(ed: &Editor) -> Result<record::Target> {
+    let r = ed.final_rect().context("nothing selected")?;
+    Ok(match ed.selected_window() {
+        Some(w) => record::Target::Window(w.clone()),
+        None => record::Target::Rect((r.left() as f64, r.top() as f64, r.width() as f64, r.height() as f64)),
+    })
+}
+
+/// Record what the screenshot overlay was switched to record, with the sound
+/// as toggled there, and otherwise as `clipt record` would.
+fn record_picked(
+    cfg: &Config,
+    args: &Args,
+    target: record::Target,
+    audio: Vec<record::audio::Source>,
+    sound: editor::SoundToggles,
+    cursor: bool,
+    backend: Option<Backend>,
+) -> Result<()> {
+    record::ensure_idle()?;
+    let audio = record::audio::Source::with_toggles(audio, sound.system, sound.mic);
+    if !audio.is_empty() {
+        record::audio::check(&audio)?;
+    }
+    let balance = record::Balance::parse(args.audio_balance.as_deref().unwrap_or(&cfg.record_audio_balance))?;
+    let opts = record::Options {
+        target,
+        output: None,
+        fps: args.fps,
+        cursor,
+        backend,
+        gif: false,
+        audio,
+        separate_audio: args.separate_audio || cfg.record_separate_audio,
+        balance,
+    };
+    record::run(cfg, opts)
 }
 
 fn deliver(cfg: &Config, args: &Args, img: image::Image, kind: capture::DisplayKind) -> Result<()> {

@@ -6,6 +6,13 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- The screenshot overlay can record a video instead: click **Video** in the
+  Screenshot | Video switch at the bottom of the screen, the camera button
+  in the toolbar, or press Ctrl+R; then select, toggle the computer's sound
+  (S) and the microphone (M), and press Enter. It starts from the sound
+  `record_audio` sets.
+
 ## [0.4.2] - 2026-11-02
 
 ### Fixed
