@@ -17,7 +17,7 @@ and handle resizes smoothly instead of jumping. No audio in the first version.
 | Frames on X11 | MIT-SHM GetImage on a timer | Already used for screenshots |
 | Encoder | `ffmpeg` subprocess, optional at runtime | Hardware H.264 (VA-API) with a libx264 fallback and nothing added to the binary. No pure-Rust encoder is real-time at 4K |
 | Resizing windows | Virtual camera: fixed canvas, eased scale-to-fit | Smooth instead of the OBS-style jump; never upscales |
-| Audio | None for now | ffmpeg can add a PipeWire/Pulse input later |
+| Audio | None for now | Planned separately: [audio-plan.md](audio-plan.md) |
 
 ## How it fits together
 

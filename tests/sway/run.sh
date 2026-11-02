@@ -343,6 +343,12 @@ if [ "$LAYOUT" = triple ]; then
   # the image must be the selection at one consistent scale
   check "spanning copy is 240x200 at 1x or 300x250 at 1.25x (got $(size /tmp/tx.png))" '[ "$(size /tmp/tx.png)" = 240x200 ] || [ "$(size /tmp/tx.png)" = 300x250 ]'
 fi
+# Sound: once per desktop, as it doesn't depend on the layout.
+if [ "$LAYOUT" = single ]; then
+  . /audio.sh
+  audio_tests "100,50 301x200"
+fi
+
 exec 3>&-
 [ -d /out ] && cp /tmp/sway.log /out/sway.log
 pkill clipt; echo "== $LAYOUT: $pass passed, $fail failed"

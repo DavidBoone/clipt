@@ -154,6 +154,12 @@ check "Esc closes it" '! pgrep -f "clipt gui" >/dev/null'
 grep "key " /tmp/gui.err | sed 's/^/  /'
 check "clipboard untouched" '[ "$(wl-paste -n 2>/dev/null)" = marker ]'
 
+# Sound: once per desktop, as it doesn't depend on the layout.
+if [ "$LAYOUT" = single ]; then
+  . /audio.sh
+  audio_tests "100,50 301x200"
+fi
+
 exec 3>&-
 pkill -f "clipt gui"
 echo "== gnome $LAYOUT: $pass passed, $fail failed"

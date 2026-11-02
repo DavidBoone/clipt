@@ -182,5 +182,11 @@ if [ "$LAYOUT" = multi ]; then
   check "selection across monitors 1/2 matches import (AE=$(ae /tmp/mx.png /tmp/mxr.png))" '[ "$(ae /tmp/mx.png /tmp/mxr.png)" = 0 ]'
 fi
 
+# Sound: once per desktop, as it doesn't depend on the layout.
+if [ "$LAYOUT" = single ]; then
+  . /audio.sh
+  audio_tests "100,50 301x200"
+fi
+
 pkill clipt; echo "== x11 $LAYOUT: $pass passed, $fail failed"
 [ $fail -eq 0 ]

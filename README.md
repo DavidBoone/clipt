@@ -61,6 +61,7 @@ clipt tray          # tray icon: click = region, right-click = menu
 clipt update        # update to the latest release (--check: just check)
 clipt record        # pick an area to record, Enter starts
 clipt record --stop # ...and stop it (or Ctrl-C, or click the tray icon)
+clipt record --audio # with the sound the computer is playing
 ```
 
 **Recording (early):** `clipt record` opens the selection overlay without the
@@ -75,7 +76,10 @@ WxH"` skip the overlay. `--pause`, `--resume` and `--toggle-pause` pause
 without a gap in the video (the frame turns amber); `--stop`, Ctrl-C or
 `max_duration` (1 h) end it. The tray menu has the same controls, and its icon
 shows a red dot while recording. Files go to `~/Videos/Screencasts` as MP4,
-or as a GIF with `--gif` (or `record_format = "gif"`).
+or as a GIF with `--gif` (or `record_format = "gif"`). `--audio` (or
+`record_audio = "system"`) records the sound the computer is playing too,
+through a PulseAudio or pipewire-pulse server; microphone recording is
+planned ([docs/audio-plan.md](docs/audio-plan.md)).
 It needs `ffmpeg` and uses the GPU encoder when there is one (VA-API on AMD
 and Intel, NVENC on NVIDIA), libx264 otherwise. It works on wlroots-family
 compositors (Sway, Hyprland, niri, labwc, river, COSMIC) directly, and on KDE
@@ -84,7 +88,7 @@ no permission dialog); libpipewire is loaded only when recording there.
 On X11 it reads frames over MIT-SHM, only when the screen changes (DAMAGE).
 Elsewhere it falls back to the ScreenCast portal (`-b portal`), which asks
 once which screen to share. `clipt record window APP` records the topmost
-window with that app id. Recording in the Flatpak is still to come (see
+window with that app id. The Flatpak records too, with its own ffmpeg (see
 [docs/recording-plan.md](docs/recording-plan.md)).
 
 Before you select anything, clipt highlights what a click would take: the

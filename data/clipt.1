@@ -26,11 +26,13 @@ large images paste into any application.
 Every output gets its own overlay at its native resolution, so mixed
 resolutions, fractional scaling and rotated monitors work.
 .PP
-\fBclipt record\fR records an output, a region or a window to MP4.
+\fBclipt record\fR records an output, a region or a window to MP4, MKV,
+MOV or GIF.
 On wlroots compositors it uses the capture protocols directly; on KDE Plasma
 and GNOME it goes through KWin's and Mutter's screencast interfaces over
-PipeWire.
-Recording needs \fBffmpeg\fR; X11 recording is planned but not supported yet.
+PipeWire; on X11 it reads the screen over MIT-SHM when it changes; elsewhere
+it uses the ScreenCast portal, which asks once which screen to share.
+Recording needs \fBffmpeg\fR.
 .PP
 After copying, clipt forks into the background to serve the clipboard until
 something else is copied, because a Wayland clipboard is owned by a live
@@ -56,8 +58,8 @@ backends available on this desktop.
 .B record
 Open the selection overlay in record mode: drag an area, or click a window
 or screen, then press \fBEnter\fR to start.
-A red frame outside the recorded area marks it; the frame is not in the
-video.
+On wlroots compositors a red frame outside the recorded area marks it; the
+frame is not in the video.
 The recording is saved in \fBvideo_dir\fR by default.
 \fBrecord region\fR is accepted as a synonym for plain \fBrecord\fR.
 .TP
@@ -109,7 +111,7 @@ Options may appear before or after the command.
 Write the PNG to \fIPATH\fR instead of the save directory; \fB\-\fR writes
 it to standard output.
 With \fBrecord\fR, \fIPATH\fR is the video file and must end in \fB.mp4\fR,
-\fB.mkv\fR or \fB.mov\fR.
+\fB.mkv\fR, \fB.mov\fR or \fB.gif\fR.
 .TP
 \fB\-c\fR, \fB\-\-clipboard\fR
 Copy the capture to the clipboard.
@@ -133,6 +135,19 @@ Include the mouse pointer in the capture, where the backend supports it.
 .TP
 \fB\-\-fps\fR \fIN\fR
 Recording frame rate, 1 to 240 (default 30); overrides \fBrecord_fps\fR.
+.TP
+\fB\-\-gif\fR
+Save the recording as a GIF, made from the recording when it stops, at most
+15 frames a second.
+.TP
+\fB\-\-audio\fR[\fB=\fR\fISOURCE\fR]
+Record sound too: \fBsystem\fR (what the computer is playing, the default)
+or \fBnone\fR.
+Overrides \fBrecord_audio\fR.
+Needs a PulseAudio or pipewire-pulse sound server; GIFs have no sound.
+.TP
+\fB\-\-no\-audio\fR
+Record without sound, whatever \fBrecord_audio\fR says.
 .TP
 \fB\-\-stop\fR, \fB\-\-pause\fR, \fB\-\-resume\fR, \fB\-\-toggle\-pause\fR
 Control a running recording; see \fBrecord\fR under COMMANDS.
@@ -234,6 +249,13 @@ Recording frame rate; \fB\-\-fps\fR overrides it.
 \fBrecord_codec\fR = \fI"auto"\fR
 Encoder: \fBauto\fR, \fBvaapi\fR, \fBnvenc\fR or \fBx264\fR.
 \fBauto\fR uses the first one that works.
+.TP
+\fBrecord_format\fR = \fI"mp4"\fR
+\fBmp4\fR or \fBgif\fR, for recordings saved to \fBvideo_dir\fR.
+An \fB\-o\fR path's extension takes precedence.
+.TP
+\fBrecord_audio\fR = \fI"none"\fR
+Sound to record: \fBnone\fR or \fBsystem\fR.
 .TP
 \fBmax_duration\fR = \fI3600\fR
 A recording stops by itself after this many seconds; 0 means no limit.
