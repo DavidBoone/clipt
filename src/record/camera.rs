@@ -106,6 +106,12 @@ fn copy_centered(f: &VideoFrame, dst: &mut [u8], cw: usize, ch: usize, ox: i64, 
 /// Bilinear: canvas pixel (x, y) shows source ((x - ox) / s, (y - oy) / s).
 /// Separable and fixed point (8-bit weights); large frames use 4 threads.
 fn scale_into(f: &VideoFrame, dst: &mut [u8], cw: usize, ch: usize, ox: f32, oy: f32, s: f32) {
+    scale_into_with_threads(f, dst, cw, ch, ox, oy, s, None);
+}
+
+/// `scale_into`, but tests and the benchmark can pin the thread count.
+#[allow(clippy::too_many_arguments)] // plain scaling call; a params struct would only add noise
+fn scale_into_with_threads(f: &VideoFrame, dst: &mut [u8], cw: usize, ch: usize, ox: f32, oy: f32, s: f32, threads: Option<usize>) {
     let (fw, fh) = (f.width as usize, f.height as usize);
     if fw < 2 || fh < 2 {
         return;
@@ -124,7 +130,7 @@ fn scale_into(f: &VideoFrame, dst: &mut [u8], cw: usize, ch: usize, ox: f32, oy:
     };
     let xs: Vec<(usize, u32)> = (x0..x1).map(|x| tap(x, ox, fw)).collect();
     let w = x1 - x0;
-    let threads = if w * (y1 - y0) > 1_000_000 { 4 } else { 1 };
+    let threads = threads.unwrap_or(if w * (y1 - y0) > 1_000_000 { 4 } else { 1 });
     let rows_per = (y1 - y0).div_ceil(threads);
     let src = &f.data;
     let region = &mut dst[y0 * cw * 4..y1 * cw * 4];
@@ -134,17 +140,34 @@ fn scale_into(f: &VideoFrame, dst: &mut [u8], cw: usize, ch: usize, ox: f32, oy:
             let mut work = move || {
                 let mut a = vec![0u32; w * 4];
                 let mut b = vec![0u32; w * 4];
-                for (r, row) in chunk.chunks_exact_mut(cw * 4).enumerate() {
-                    let (j, wy) = tap(y0 + t * rows_per + r, oy, fh);
-                    for (line, acc) in [(j, &mut a), (j + 1, &mut b)] {
-                        let l = &src[line * fw * 4..(line + 1) * fw * 4];
-                        for (k, &(i, wx)) in xs.iter().enumerate() {
-                            let p = &l[i * 4..i * 4 + 8];
-                            for c in 0..4 {
-                                acc[k * 4 + c] = p[c] as u32 * (256 - wx) + p[c + 4] as u32 * wx;
-                            }
+                let horiz = |line: usize, acc: &mut [u32]| {
+                    let l = &src[line * fw * 4..(line + 1) * fw * 4];
+                    for (k, &(i, wx)) in xs.iter().enumerate() {
+                        let p = &l[i * 4..i * 4 + 8];
+                        for c in 0..4 {
+                            acc[k * 4 + c] = p[c] as u32 * (256 - wx) + p[c + 4] as u32 * wx;
                         }
                     }
+                };
+                // Source row `j` only grows as output rows advance, so the
+                // previous row's two horizontal passes are usually the next
+                // row's too. Keep them in a and b: same row, nothing to do;
+                // one row on, `b` becomes `a` and only the new row is scaled.
+                let mut prev = None;
+                for (r, row) in chunk.chunks_exact_mut(cw * 4).enumerate() {
+                    let (j, wy) = tap(y0 + t * rows_per + r, oy, fh);
+                    match prev {
+                        Some(p) if p == j => {}
+                        Some(p) if p + 1 == j => {
+                            std::mem::swap(&mut a, &mut b);
+                            horiz(j + 1, &mut b);
+                        }
+                        _ => {
+                            horiz(j, &mut a);
+                            horiz(j + 1, &mut b);
+                        }
+                    }
+                    prev = Some(j);
                     let out = &mut row[x0 * 4..x1 * 4];
                     for k in 0..w * 4 {
                         out[k] = ((a[k] * (256 - wy) + b[k] * wy) >> 16) as u8;
@@ -180,6 +203,153 @@ mod tests {
             }
         }
         (x0, y0, x1 - x0, y1 - y0)
+    }
+
+    /// Deterministic per-pixel noise: every neighbouring byte differs, so a
+    /// changed weight or tap shows up in the output.
+    fn noise(w: u32, h: u32) -> VideoFrame {
+        let mut state = 0x9e37_79b9u32;
+        let mut data = Vec::with_capacity((w as usize * h as usize) * 4);
+        for _ in 0..w as usize * h as usize {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let p = state.to_le_bytes();
+            data.extend_from_slice(&[p[0], p[1], p[2], 0xff]);
+        }
+        VideoFrame { width: w, height: h, order: PixelOrder::Bgrx, data }
+    }
+
+    /// `scale_into` as it was before reusing the previous row's horizontal
+    /// pass, kept so the tests can prove the new one is byte-identical.
+    #[allow(clippy::too_many_arguments)] // mirrors the scaler it replaces
+    fn scale_into_reference(f: &VideoFrame, dst: &mut [u8], cw: usize, ch: usize, ox: f32, oy: f32, s: f32, threads: usize) {
+        let (fw, fh) = (f.width as usize, f.height as usize);
+        if fw < 2 || fh < 2 {
+            return;
+        }
+        let x0 = ox.max(0.0).floor() as usize;
+        let x1 = ((ox + fw as f32 * s).ceil().max(0.0) as usize).min(cw);
+        let y0 = oy.max(0.0).floor() as usize;
+        let y1 = ((oy + fh as f32 * s).ceil().max(0.0) as usize).min(ch);
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let tap = |d: usize, o: f32, n: usize| -> (usize, u32) {
+            let v = ((d as f32 + 0.5 - o) / s - 0.5).clamp(0.0, (n - 1) as f32);
+            let i = (v as usize).min(n - 2);
+            (i, ((v - i as f32) * 256.0) as u32)
+        };
+        let xs: Vec<(usize, u32)> = (x0..x1).map(|x| tap(x, ox, fw)).collect();
+        let w = x1 - x0;
+        let rows_per = (y1 - y0).div_ceil(threads);
+        let src = &f.data;
+        let region = &mut dst[y0 * cw * 4..y1 * cw * 4];
+        std::thread::scope(|sc| {
+            for (t, chunk) in region.chunks_mut(rows_per * cw * 4).enumerate() {
+                let xs = &xs;
+                let mut work = move || {
+                    let mut a = vec![0u32; w * 4];
+                    let mut b = vec![0u32; w * 4];
+                    for (r, row) in chunk.chunks_exact_mut(cw * 4).enumerate() {
+                        let (j, wy) = tap(y0 + t * rows_per + r, oy, fh);
+                        for (line, acc) in [(j, &mut a), (j + 1, &mut b)] {
+                            let l = &src[line * fw * 4..(line + 1) * fw * 4];
+                            for (k, &(i, wx)) in xs.iter().enumerate() {
+                                let p = &l[i * 4..i * 4 + 8];
+                                for c in 0..4 {
+                                    acc[k * 4 + c] = p[c] as u32 * (256 - wx) + p[c + 4] as u32 * wx;
+                                }
+                            }
+                        }
+                        let out = &mut row[x0 * 4..x1 * 4];
+                        for k in 0..w * 4 {
+                            out[k] = ((a[k] * (256 - wy) + b[k] * wy) >> 16) as u8;
+                        }
+                    }
+                };
+                if threads == 1 {
+                    work();
+                } else {
+                    sc.spawn(work);
+                }
+            }
+        });
+    }
+
+    fn scaled(f: &VideoFrame, cw: usize, ch: usize, ox: f32, oy: f32, s: f32, threads: usize) -> Vec<u8> {
+        let mut dst = BG.repeat(cw * ch);
+        scale_into_with_threads(f, &mut dst, cw, ch, ox, oy, s, Some(threads));
+        dst
+    }
+
+    fn scaled_reference(f: &VideoFrame, cw: usize, ch: usize, ox: f32, oy: f32, s: f32, threads: usize) -> Vec<u8> {
+        let mut dst = BG.repeat(cw * ch);
+        scale_into_reference(f, &mut dst, cw, ch, ox, oy, s, threads);
+        dst
+    }
+
+    #[test]
+    fn row_reuse_is_byte_identical() {
+        let big = noise(3840, 2160);
+        let mid = noise(2560, 1440);
+        // (label, frame, canvas w, canvas h, ox, oy, scale)
+        let cases = [
+            ("4K below 1", &big, 2304, 1296, 0.0, 0.0, 0.6),
+            ("4K below 1, fractional offset", &big, 2560, 1440, 128.5, -73.25, 0.6),
+            ("4K near 1", &big, 3801, 2138, 11.3, 5.7, 0.99),
+            ("4K -> 3072x1728", &big, 3072, 1728, 0.0, 0.0, 0.8),
+            ("4K -> 3072x1728, clipped offset", &big, 3072, 1728, -325.5, -108.25, 0.8),
+            ("2560x1440 -> 1920x1080", &mid, 1920, 1080, 0.0, 0.0, 0.75),
+            ("2560x1440 -> 1920x1080, offset", &mid, 2200, 1400, 100.5, -30.75, 0.75),
+        ];
+        for (label, f, cw, ch, ox, oy, s) in cases {
+            for threads in [1, 4] {
+                let want = scaled_reference(f, cw, ch, ox, oy, s, threads);
+                let got = scaled(f, cw, ch, ox, oy, s, threads);
+                if got != want {
+                    let at = got.iter().zip(&want).position(|(a, b)| a != b).unwrap();
+                    panic!("{label}, {threads} thread(s): first difference at byte {at}");
+                }
+            }
+        }
+    }
+
+    /// `cargo test --release bench_scale -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_scale() {
+        let big = noise(3840, 2160);
+        let mid = noise(2560, 1440);
+        let cases = [("4K -> 3072x1728", &big, 3072, 1728, 0.8), ("2560x1440 -> 1920x1080", &mid, 1920, 1080, 0.75)];
+        const RUNS: usize = 20;
+        for (label, f, cw, ch, s) in cases {
+            for threads in [1, 4] {
+                let mut dst = BG.repeat(cw * ch);
+                let mut run = |reference: bool| {
+                    let t = Instant::now();
+                    for _ in 0..RUNS {
+                        if reference {
+                            scale_into_reference(f, &mut dst, cw, ch, 0.0, 0.0, s, threads);
+                        } else {
+                            scale_into_with_threads(f, &mut dst, cw, ch, 0.0, 0.0, s, Some(threads));
+                        }
+                    }
+                    t.elapsed().as_secs_f64() * 1e3 / RUNS as f64
+                };
+                // Alternate the two so frequency drift doesn't favour either,
+                // and take the best of three to blunt scheduler noise.
+                let (mut before, mut after) = (f64::INFINITY, f64::INFINITY);
+                for _ in 0..3 {
+                    before = before.min(run(true));
+                    after = after.min(run(false));
+                }
+                eprintln!(
+                    "{label}, {threads} thread(s): before {before:.2} ms, after {after:.2} ms ({:.0} % less)",
+                    (1.0 - after / before) * 100.0
+                );
+            }
+        }
     }
 
     #[test]
