@@ -2,7 +2,8 @@
 
 Status: phases 0–3 done (system sound; several sources, volumes, separate
 tracks, devices; overlay and tray controls, the Flatpak), 2026-11-01. Phase
-4 (smart balance) proposed.
+4 (smart balance) under way: the ffmpeg watchdog and `duck` done
+(2026-11-02); `smart` next.
 
 ## Goal
 
@@ -193,7 +194,7 @@ send. Tested: Sway e2e (S in the overlay turns sound on, and off when the
 setting has it on), unit tests for the toggles and the tray checkbox, the
 toolbar rendered and looked at, and a tone recorded through the Flatpak.
 
-**4. Smart balance (proposed).** Keeping a voice intelligible over the
+**4. Smart balance (under way).** Keeping a voice intelligible over the
 desktop's sound, from the voice-over-music rules below. Its spike is done.
 Order of work it suggests:
 a watchdog on ffmpeg finishing (protects every recording, not just this
@@ -202,6 +203,27 @@ then `smart` (voice gate, leakage check, SII report, at-stop re-mix for
 loud beds); the dynamic EQ last, if at all. The background classifier
 (YAMNet) isn't worth building: the 20 dB default stays (see the spike
 list).
+
+Done so far:
+- **The watchdog** (#46): after 30 s without ffmpeg finishing, clipt kills
+  it and reports the partial file.
+- **`duck`** (#48): `--audio-balance=duck` or `record_audio_balance =
+  "duck"`. Only the `mic` source counts as the voice for now: `:` already
+  sets a volume (`mic:0.7`), so marking a named device needs its own
+  syntax. The spike's clean-up chain and ducking settings, in the mix only;
+  separate tracks stay as recorded, for the at-stop re-mix. **Level
+  matching** can't be a fixed make-up gain: a compressor's net gain
+  depends on the input level, so the 9.5 dB that matched at −23 dBFS made
+  a LibriVox voice at −45 dBFS 10 dB louder (with its noise). The make-up
+  follows the voice instead: the raw and cleaned voice's power, each
+  smoothed over about 1.6 s, and the cleaned voice scaled by the square
+  root of their ratio (within ±12 dB). It stays within 0.1 dB from −45 to
+  −23 dBFS, peaks no higher than the raw ones, and costs about 2 % of a
+  core against 0.5 %. Two ffmpeg traps it hit: `aeval` leaves the channel
+  layout unset, after which `lowpass` filters nothing; and `amerge` can't
+  pick a format between clipt's 16-bit sound and the compressor's doubles.
+  An `aformat` fixes each. The Sway e2e test shows the system sound
+  dipping 10.6 dB under the microphone.
 
 ## Smart balance (phase 4)
 
@@ -341,8 +363,8 @@ Spike:
   remains the fallback if the leakage check proves not enough.
 - Found (same document): the dynamic-EQ graph (`acrossover`,
   `sidechaincompress`, `amix`) sometimes hung at end of stream in ffmpeg
-  9.0.2, and clipt waits for ffmpeg to finish with no limit, so a
-  watchdog comes first.
+  9.0.2, and clipt waited for ffmpeg to finish with no limit, so a
+  watchdog came first (done, #46).
 
 ## Spike results (2026-11-01)
 
