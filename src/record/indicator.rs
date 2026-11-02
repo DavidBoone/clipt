@@ -2,7 +2,8 @@
 //! strips just *outside* the region, so the frame never appears in the
 //! video, with an empty input region so clicks go through to what's below.
 //! Amber while paused. Not shown for whole-screen recordings, where it would
-//! be in the video.
+//! be in the video. GNOME has no layer-shell; there clipt's GNOME Shell
+//! extension draws the same frame, if it's installed.
 
 use super::{PAUSED, STOP};
 use crate::capture::{LogicalRect, Output};
@@ -66,7 +67,9 @@ pub fn run(out: &Output, crop: LogicalRect) -> Result<()> {
     let qh = queue.handle();
     let compositor: wl_compositor::WlCompositor = globals.bind(&qh, 1..=4, ())?;
     let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ())?;
-    let layer_shell: ZwlrLayerShellV1 = globals.bind(&qh, 1..=4, ()).context("no layer-shell for the recording frame")?;
+    let Ok(layer_shell) = globals.bind::<ZwlrLayerShellV1, _, _>(&qh, 1..=4, ()) else {
+        return gnome(out, crop);
+    };
     let mut state = State { outputs: Vec::new(), strips: Vec::new() };
     for g in globals.contents().clone_list() {
         if g.interface == "wl_output" && g.version >= 4 {
@@ -127,6 +130,36 @@ pub fn run(out: &Output, crop: LogicalRect) -> Result<()> {
         }
         queue.dispatch_pending(&mut state)?;
     }
+    Ok(())
+}
+
+/// GNOME: ask clipt's GNOME Shell extension to draw the frame (the area in
+/// the layout coordinates clipt's outputs use), turn it amber while paused,
+/// and take it down at the stop. The extension also takes it down if clipt
+/// goes away without saying.
+fn gnome(out: &Output, crop: LogicalRect) -> Result<()> {
+    const NAME: &str = "io.github.jasondyck.clipt.Windows";
+    let conn = crate::dbus::session().context("connecting to the session bus")?;
+    anyhow::ensure!(
+        crate::dbus::name_has_owner(&conn, NAME),
+        "no layer-shell, and no clipt GNOME Shell extension to draw it with (on GNOME: clipt gnome-extension)"
+    );
+    let ext = crate::dbus::Proxy::new(&conn, NAME, "/io/github/jasondyck/clipt/Windows", NAME)?;
+    let area =
+        ((out.x as f64 + crop.0).round() as i32, (out.y as f64 + crop.1).round() as i32, crop.2.round() as i32, crop.3.round() as i32);
+    let show = |paused: bool| ext.call::<_, ()>("ShowFrame", &(area.0, area.1, area.2, area.3, paused));
+    // An extension from before the frame doesn't know the method.
+    show(false).context("the clipt GNOME Shell extension can't draw the frame; run clipt gnome-extension again and log in again")?;
+    let mut paused = false;
+    while !STOP.load(Ordering::SeqCst) {
+        let now = PAUSED.load(Ordering::SeqCst);
+        if now != paused {
+            paused = now;
+            show(paused)?;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = ext.call::<_, ()>("HideFrame", &());
     Ok(())
 }
 

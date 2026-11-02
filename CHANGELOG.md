@@ -7,6 +7,9 @@ All notable changes are listed here. The format follows
 ## [Unreleased]
 
 ### Added
+- The red frame around a recording now shows on GNOME too, drawn by clipt's
+  GNOME Shell extension (amber while paused). After updating, run
+  `clipt gnome-extension` again and log out and back in.
 - The screenshot overlay can record a video instead: click **Video** in the
   Screenshot | Video switch at the bottom of the screen, the camera button
   in the toolbar, or press Ctrl+R; then select, toggle the computer's sound

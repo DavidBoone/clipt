@@ -84,6 +84,25 @@ if [ -x /testwin ]; then
   kill $tw 2>/dev/null
 fi
 
+echo "-- recording frame (clipt's GNOME Shell extension)"
+# A pixel in the frame's left strip, just outside the recorded area, in a
+# screenshot taken while recording: red, amber while paused, gone after.
+px()  { magick "$1" -format "%[fx:int(255*u.r)],%[fx:int(255*u.g)],%[fx:int(255*u.b)]" -crop 1x1+$2+$3 info: 2>/dev/null; }
+near() { awk -v a="$1" -v b="$2" 'BEGIN{split(a,x,",");split(b,y,",");d=0;for(i=1;i<=3;i++){e=x[i]-y[i];d+=e<0?-e:e};exit !(d<60)}'; }
+CLIPT_DEBUG=1 clipt record -g "100,50 301x200" -o /tmp/rec-f.mp4 2>/tmp/rec.err & rp=$!; sleep 1.5
+clipt full -o /tmp/frame-on.png 2>/dev/null
+clipt record --pause; sleep 0.5; clipt full -o /tmp/frame-paused.png 2>/dev/null
+clipt record --stop; wait $rp; sleep 0.5
+clipt full -o /tmp/frame-off.png 2>/dev/null
+# The whole-desktop screenshot is at the highest monitor scale (2x in dual).
+k=$(( $(magick identify -format %h /tmp/frame-on.png) / 720 )); fx=$((98 * k)); fy=$((150 * k))
+on=$(px /tmp/frame-on.png $fx $fy); paused=$(px /tmp/frame-paused.png $fx $fy); off=$(px /tmp/frame-off.png $fx $fy)
+check "a red frame just outside the area while recording ($on)" 'near "$on" 239,68,68'
+check "amber while paused ($paused)" 'near "$paused" 245,158,11'
+check "gone after the stop ($off)" '! near "$off" 239,68,68 && ! near "$off" 245,158,11'
+check "and not in the video ($(vsize /tmp/rec-f.mp4))" '[ "$(vsize /tmp/rec-f.mp4)" = 302x200 ]'
+grep -i "frame" /tmp/rec.err | head -2 | sed 's/^/  /'
+
 mkfifo /tmp/rin; python3 /rdinput.py < /tmp/rin 2>/tmp/rd.err & exec 3>/tmp/rin
 
 if [ "$LAYOUT" = single ]; then
