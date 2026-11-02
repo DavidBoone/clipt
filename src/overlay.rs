@@ -32,7 +32,6 @@ use smithay_client_toolkit::{
     },
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
-use std::io::Write;
 use std::sync::Arc;
 use wayland_client::{
     Connection, QueueHandle,
@@ -732,7 +731,7 @@ impl DataOfferHandler for Overlay {
 
 impl DataSourceHandler for Overlay {
     fn accept_mime(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, _: Option<String>) {}
-    fn send_request(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, mime: String, mut pipe: WritePipe) {
+    fn send_request(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, mime: String, pipe: WritePipe) {
         let Some((_, data)) = &self.clip else { return };
         if mime != "image/png" {
             return;
@@ -740,9 +739,7 @@ impl DataSourceHandler for Overlay {
         let data = data.clone();
         // Large PNGs fill the pipe and may still be encoding; write off-thread
         // so we keep answering.
-        std::thread::spawn(move || {
-            let _ = pipe.write_all(&data.wait());
-        });
+        std::thread::spawn(move || crate::clipboard::write_paste(pipe, &data.wait()));
     }
     fn cancelled(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {
         self.clip_done = true;

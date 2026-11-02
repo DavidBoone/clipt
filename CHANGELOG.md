@@ -6,6 +6,11 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Pasting a screenshot into Chromium-based apps (Edge, Teams, Chrome)
+  could give only the top of the image, grey below: those apps hand over a
+  non-blocking pipe, and clipt stopped writing once its 64 KB buffer filled.
+
 ## [0.4.0] - 2026-11-02
 
 ### Added

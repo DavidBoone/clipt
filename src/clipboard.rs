@@ -80,10 +80,30 @@ data_control!(
 );
 
 fn serve(data: Arc<Vec<u8>>, fd: OwnedFd) {
-    std::thread::spawn(move || {
-        let mut f = std::fs::File::from(fd);
-        let _ = f.write_all(&data);
-    });
+    std::thread::spawn(move || write_paste(std::fs::File::from(fd), &data));
+}
+
+/// Answer a paste: write all of `data` to the pipe the pasting app gave.
+/// Some apps (Chromium-based ones such as Edge and Teams) make that pipe
+/// non-blocking, and then a plain `write_all` stops with "would block" once
+/// the pipe's 64 KB buffer fills, so the app got a cut-off PNG: the top of
+/// the image and grey below. Our end is made blocking first, so the write
+/// waits for the app to read. The flag is on the write end, which only we
+/// use.
+pub fn write_paste(mut pipe: impl Write + std::os::fd::AsFd, data: &[u8]) {
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+    if let Ok(flags) = fcntl_getfl(&pipe)
+        && flags.contains(OFlags::NONBLOCK)
+    {
+        let _ = fcntl_setfl(&pipe, flags - OFlags::NONBLOCK);
+    }
+    // An app that stops reading early (it cancelled the paste) closes its
+    // end; that's normal, so it's only reported when debugging.
+    if let Err(e) = pipe.write_all(data)
+        && std::env::var_os("CLIPT_DEBUG").is_some()
+    {
+        eprintln!("clipt: paste of {} bytes stopped: {e}", data.len());
+    }
 }
 
 /// Claim the clipboard and block until someone else replaces it.
@@ -116,3 +136,41 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
     }
 }
 wayland_client::delegate_noop!(State: ignore wl_seat::WlSeat);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustix::pipe::{PipeFlags, pipe_with};
+    use std::io::Read;
+
+    /// A non-blocking pipe, read slowly: all of a PNG larger than the pipe's
+    /// buffer arrives. A plain `write_all` stops at the buffer's size.
+    #[test]
+    fn a_non_blocking_pipe_gets_everything() {
+        let data: Vec<u8> = (0..1_000_000u32).map(|i| (i % 251) as u8).collect();
+        let (read, write) = pipe_with(PipeFlags::NONBLOCK).unwrap();
+        let mut plain = std::fs::File::from(write.try_clone().unwrap());
+        assert!(plain.write_all(&data).is_err(), "a plain write_all gives up on a full non-blocking pipe");
+        drop((plain, write));
+        // Drain what the failed write left, on a fresh pipe for the real test.
+        drop(read);
+
+        let (read, write) = pipe_with(PipeFlags::NONBLOCK).unwrap();
+        let expect = data.clone();
+        let writer = std::thread::spawn(move || write_paste(std::fs::File::from(write), &data));
+        let mut reader = std::fs::File::from(read);
+        rustix::fs::fcntl_setfl(&reader, rustix::fs::OFlags::empty()).unwrap();
+        let mut got = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            std::thread::sleep(std::time::Duration::from_micros(200));
+            match reader.read(&mut buf).unwrap() {
+                0 => break,
+                n => got.extend_from_slice(&buf[..n]),
+            }
+        }
+        writer.join().unwrap();
+        assert_eq!(got.len(), expect.len());
+        assert!(got == expect);
+    }
+}
