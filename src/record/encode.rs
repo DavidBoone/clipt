@@ -236,9 +236,33 @@ impl Balance {
 
 /// Voice clean-up for `duck`, from the phase 4 spike: high-pass at 80 Hz,
 /// 3:1 compression from -30 dB (threshold 0.0316), de-essing and a 3 kHz
-/// presence boost. The spike's 4 dB make-up left the voice 5.5 dB quieter;
-/// 9.5 dB (`makeup=3`) brings the cleaned voice back to the raw one's level.
-const CLEAN_MIC: &str = "highpass=f=80,acompressor=threshold=0.0316:ratio=3:makeup=3.0,deesser,equalizer=f=3000:width_type=q:w=1:g=3";
+/// presence boost. No make-up gain: `LEVEL` and `MATCH` restore the level.
+const CLEAN_MIC: &str = "highpass=f=80,acompressor=threshold=0.0316:ratio=3,deesser,equalizer=f=3000:width_type=q:w=1:g=3";
+/// The clean-up must not change how loud the voice is (a quieter voice
+/// undoes the ducking; a louder one lifts its noise), and a compressor's
+/// fixed make-up only matches at one level: 9.5 dB was right at -23 dBFS
+/// but added 10 dB at -45. So the make-up follows the voice: the raw and
+/// cleaned voice's power (L² + R², from an `amerge` of the two), each
+/// smoothed over about 1.6 s, and the cleaned voice scaled by the square
+/// root of their ratio, held within ±12 dB. Loud moments dominate both
+/// sums, so the level is right from the first word, even after a pause.
+/// `aeval` leaves the channel layout unset, and `lowpass` then filters
+/// nothing, hence the `aformat`s.
+const LEVEL: &str =
+    "aeval='(val(0)*val(0)+val(1)*val(1))|(val(2)*val(2)+val(3)*val(3))':c=stereo,aformat=channel_layouts=stereo,lowpass=f=0.1:p=1";
+const MATCH: &str = "aeval='val(0)*clip(sqrt((val(2)+1e-30)/(val(3)+1e-30)),0.25,4)|val(1)*clip(sqrt((val(2)+1e-30)/(val(3)+1e-30)),0.25,4)':c=stereo,aformat=channel_layouts=stereo";
+
+/// `amerge` needs its inputs in one sample format: clipt sends 16-bit, and
+/// the compressor gives doubles.
+const FLOAT: &str = "aformat=sample_fmts=fltp:channel_layouts=stereo";
+
+/// The voice from `[wet{i}]` cleaned up at its own level, split into `outs`.
+fn clean_voice(i: usize, outs: &str) -> String {
+    format!(
+        "[wet{i}]{FLOAT},asplit=2[raw{i}][pre{i}];[pre{i}]{CLEAN_MIC},{FLOAT},asplit=2[cl{i}][cp{i}];\
+         [raw{i}][cp{i}]amerge=inputs=2,{LEVEL}[lv{i}];[cl{i}][lv{i}]amerge=inputs=2,{MATCH},asplit=2{outs}"
+    )
+}
 /// The ducking from the spike: about 11 dB of dip while the voice speaks.
 const DUCK: &str = "sidechaincompress=threshold=0.02:ratio=8:attack=20:release=300";
 
@@ -306,13 +330,13 @@ impl Sound {
         // The clean voice is split into the mix and the keys. One key is
         // named directly; several need a second split.
         let key = if others.len() == 1 { format!("[k{}]", others[0]) } else { "[key]".to_string() };
-        if separate {
-            graph.push(format!("[0:a:{voice}]{RESAMPLE},asplit=2[wet{voice}][t{voice}]"));
-            graph.push(format!("[wet{voice}]{CLEAN_MIC},asplit=2[m{voice}]{key}"));
+        graph.push(if separate {
+            format!("[0:a:{voice}]{RESAMPLE},asplit=2[wet{voice}][t{voice}]")
         } else {
-            graph.push(format!("[0:a:{voice}]{RESAMPLE},{CLEAN_MIC},asplit=2[m{voice}]{key}"));
-        }
-        graph.push(format!("[m{voice}]volume={}[v{voice}]", self.volumes[voice]));
+            format!("[0:a:{voice}]{RESAMPLE}[wet{voice}]")
+        });
+        graph.push(clean_voice(voice, &format!("[m{voice}]{key}")));
+        graph.push(format!("[m{voice}]anull{}[v{voice}]", volume_arg(self.volumes[voice])));
         if others.len() > 1 {
             let keys: String = others.iter().map(|i| format!("[k{i}]")).collect();
             graph.push(format!("[key]asplit={}{keys}", others.len()));
@@ -640,8 +664,9 @@ mod tests {
         assert_eq!(
             graph(&duck),
             format!(
-                "[0:a:1]{RESAMPLE},{CLEAN_MIC},asplit=2[m1][k0];[m1]volume=1[v1];\
-                 [0:a:0]{RESAMPLE},volume=0.7[w0];[w0][k0]{DUCK}[v0];[v0][v1]{MIX}:inputs=2[mix]"
+                "[0:a:1]{RESAMPLE}[wet1];{};[m1]anull[v1];\
+                 [0:a:0]{RESAMPLE},volume=0.7[w0];[w0][k0]{DUCK}[v0];[v0][v1]{MIX}:inputs=2[mix]",
+                clean_voice(1, "[m1][k0]")
             )
         );
         assert_eq!(maps(&duck), ["0:v", "[mix]"]);
@@ -651,8 +676,9 @@ mod tests {
         assert_eq!(
             graph(&sep),
             format!(
-                "[0:a:1]{RESAMPLE},asplit=2[wet1][t1];[wet1]{CLEAN_MIC},asplit=2[m1][k0];[m1]volume=1[v1];\
-                 [0:a:0]{RESAMPLE},asplit=2[m0][t0];[m0]volume=0.7[w0];[w0][k0]{DUCK}[v0];[v0][v1]{MIX}:inputs=2[mix]"
+                "[0:a:1]{RESAMPLE},asplit=2[wet1][t1];{};[m1]anull[v1];\
+                 [0:a:0]{RESAMPLE},asplit=2[m0][t0];[m0]volume=0.7[w0];[w0][k0]{DUCK}[v0];[v0][v1]{MIX}:inputs=2[mix]",
+                clean_voice(1, "[m1][k0]")
             )
         );
         assert_eq!(maps(&sep), ["0:v", "[mix]", "[t0]", "[t1]"]);
@@ -674,12 +700,12 @@ mod tests {
         assert!(Balance::parse("smart").is_err(), "smart is a later phase");
     }
 
-    /// Mean level (dBFS) of a lavfi `source` through `filter`, as
-    /// volumedetect reports it.
-    fn mean_volume(source: &str, filter: &str) -> f64 {
-        let af = if filter.is_empty() { "volumedetect".to_string() } else { format!("{filter},volumedetect") };
+    /// Mean level (dBFS) of a lavfi `source` through a filter graph from
+    /// `[0:a]` to `[o]`, as volumedetect reports it.
+    fn mean_volume(source: &str, graph: &str) -> f64 {
         let out = Command::new("ffmpeg")
-            .args(["-hide_banner", "-nostats", "-f", "lavfi", "-i", source, "-af", &af, "-f", "null", "-"])
+            .args(["-hide_banner", "-nostats", "-f", "lavfi", "-i", source])
+            .args(["-filter_complex", &format!("{graph};[o]volumedetect"), "-f", "null", "-"])
             .stdin(Stdio::null())
             .output()
             .expect("running ffmpeg");
@@ -691,10 +717,11 @@ mod tests {
             .expect("volumedetect reported no mean level")
     }
 
-    /// The clean-up chain leaves the voice at its recorded level: within 1 dB
-    /// of the raw voice on speech-like sound at about -23 dBFS mean, the
-    /// spike's voice level. With the spike's 4 dB make-up the same signal
-    /// comes out 5.6 dB quieter; it measured 5.5 dB there.
+    /// The clean-up leaves the voice at its recorded level, quiet or loud:
+    /// within 1 dB of the raw voice from -45 to -23 dBFS mean on speech-like
+    /// sound. The fixed 9.5 dB make-up this replaces was right at -23 but
+    /// 9 dB too loud at -45 (and on LibriVox readings, 10 dB at -45, 7 at
+    /// -35; this chain is within 0.1 dB of them throughout).
     #[test]
     fn duck_cleanup_keeps_the_voice_level() {
         let _ffmpeg = FFMPEG.lock().unwrap_or_else(|e| e.into_inner());
@@ -702,11 +729,18 @@ mod tests {
             return;
         }
         // A voiced vowel, modulated at a syllable rate with pauses: the
-        // speech-shaped stand-in for the spike's reading.
-        let voice = "aevalsrc='(0.152*sin(2*PI*130*t)+0.091*sin(2*PI*260*t)+0.053*sin(2*PI*520*t)+0.030*sin(2*PI*1040*t)+0.015*sin(2*PI*2080*t))*if(lt(mod(t,0.82),0.2),1,if(lt(mod(t,0.82),0.5),0.3,0.05))':s=48000:d=10";
-        let raw = mean_volume(voice, "");
-        let cleaned = mean_volume(voice, CLEAN_MIC);
-        assert!((raw - cleaned).abs() < 1.0, "cleaned voice is {:.2} dB from the raw one ({raw:.1} -> {cleaned:.1} dBFS)", cleaned - raw);
+        // speech-shaped stand-in for the spike's reading, at -23 dBFS mean.
+        let vowel = "(0.152*sin(2*PI*130*t)+0.091*sin(2*PI*260*t)+0.053*sin(2*PI*520*t)+0.030*sin(2*PI*1040*t)+0.015*sin(2*PI*2080*t))*if(lt(mod(t,0.82),0.2),1,if(lt(mod(t,0.82),0.5),0.3,0.05))";
+        let voice = format!("aevalsrc='{vowel}|{vowel}':s=48000:d=10");
+        for gain in [-22, -12, 0] {
+            let raw = mean_volume(&voice, &format!("[0:a]volume={gain}dB[o]"));
+            let cleaned = mean_volume(&voice, &format!("[0:a]volume={gain}dB[wet0];{};[x]anullsink", clean_voice(0, "[o][x]")));
+            assert!(
+                (raw - cleaned).abs() < 1.0,
+                "cleaned voice is {:.2} dB from the raw one ({raw:.1} -> {cleaned:.1} dBFS)",
+                cleaned - raw
+            );
+        }
     }
 
     #[test]

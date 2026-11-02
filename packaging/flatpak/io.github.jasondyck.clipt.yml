@@ -45,7 +45,8 @@ modules:
   # (VA-API, NVENC loaded from the NVIDIA driver at run time, libx264), the
   # Matroska stream it's fed, the containers clipt accepts (.mp4 .mkv .mov
   # .gif), the filters in its command lines, and for sound: PCM in, AAC
-  # out, the resampler, mixer and the voice clean-up and ducking filters.
+  # out, the resampler, mixer and the voice clean-up, level-matching and
+  # ducking filters.
   - name: x264
     buildsystem: autotools
     config-opts:
@@ -98,7 +99,7 @@ modules:
       - --enable-parser=h264
       - --enable-encoder=libx264,h264_vaapi,h264_nvenc,gif,aac
       - --enable-muxer=mp4,mov,matroska,gif,null
-      - --enable-filter=color,format,pad,scale,hwupload,scale_vaapi,fps,split,palettegen,paletteuse,null,aresample,amix,asplit,volume,anullsrc,highpass,acompressor,deesser,equalizer,sidechaincompress
+      - --enable-filter=color,format,pad,scale,hwupload,scale_vaapi,fps,split,palettegen,paletteuse,null,aresample,amix,asplit,volume,anullsrc,highpass,acompressor,deesser,equalizer,sidechaincompress,amerge,aeval,aformat,lowpass,anull
     cleanup:
       - /include
       - /lib
