@@ -14,8 +14,8 @@ default, and what it costs to run through tract.
 - **It runs through tract, as the plan requires.** `tract-onnx` 0.23.9 loads
   the hash-checked ONNX export in 45.8 ms and runs a 0.96 s window in
   4.15 ms on one core. With the 0.48 s hop that is 8.5 ms of inference
-  per second of audio, plus 0.55 ms of resampling. The
-  whole path is about 0.9 % of one core.
+  per second of audio, plus 0.55 ms of resampling. The whole path is about
+  0.9 % of one core.
 - **Clean speech, instrumental music and noise are easy; music with vocals
   is not.** After smoothing, on windows away from transitions, YAMNet finds
   97 % of speech, 93 % of instrumental music and 100 % of noise, but only
@@ -79,7 +79,7 @@ the same signal paths.
 
 | File | Content | Source | Licence |
 |---|---|---|---|
-| `speech.wav` | 36.5 s: 2 s lead, eight speech segments of 2.2–3.3 s with 1.5 s gaps, 2 s tail | [LibriVox Short Poetry Collection 190](https://archive.org/details/spc190_1904_librivox), tracks `spc190_ahareyoudiggingonmygrave_wm`, `spc190_arithmeticonthefrontier_js`, `spc190_barter_agh` | public domain mark 1.0 |
+| `speech.wav` | 36.5 s: 2 s lead, eight speech segments of 2.0–3.3 s with 1.5 s gaps, 2 s tail | [LibriVox Short Poetry Collection 190](https://archive.org/details/spc190_1904_librivox), tracks `spc190_ahareyoudiggingonmygrave_wm`, `spc190_arithmeticonthefrontier_js`, `spc190_barter_agh` | public domain mark 1.0 |
 | `music_with_vocals.wav`, `music_instrumental.wav` | 36.5 s from 0:30 of "Here Lies", vocal and NoVox versions | [Josh Woodward, *The Shade From Our Trees*](https://archive.org/details/JoshWoodward-TheShadeFromOurTrees) and [the NoVox release](https://archive.org/details/JoshWoodward-TheShadeFromOurTrees-NoVox) | CC BY 4.0 |
 | `HalfLife_vox.wav`, `HalfLife_instrumental.wav` | the same 36.5 s of "Half Life", vocal and NoVox | as above | CC BY 4.0 |
 | `Bully_vox.wav`, `Bully_instrumental.wav` | the same 36.5 s of "Bully", vocal and NoVox | as above | CC BY 4.0 |
