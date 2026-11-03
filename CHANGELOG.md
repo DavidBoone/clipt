@@ -7,6 +7,11 @@ All notable changes are listed here. The format follows
 ## [Unreleased]
 
 ### Added
+- macOS: a menu bar icon, which opening clipt.app starts, with the Linux
+  tray's screenshot actions and Open at Login (macOS 13+), and global
+  shortcuts that need no Accessibility permission: ⌘⇧2 captures a region
+  (`hotkey` in the config, "" for none) and `hotkey_full` copies the whole
+  desktop.
 - A colour wheel for the editor's colours: right-click one of the eight in
   the toolbar to change it. The new colours are kept in the config as
   `palette`, which can also be set by hand.

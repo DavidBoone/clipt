@@ -124,7 +124,14 @@ pub fn run(cfg: &Config) -> Result<()> {
         if spec.is_empty() {
             continue;
         }
-        let key = Hotkey::parse(spec).with_context(|| format!("hotkey '{spec}'"))?;
+        // A mistyped shortcut costs only that shortcut, not the menu bar icon.
+        let key = match Hotkey::parse(spec) {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!("clipt: hotkey '{spec}': {e:#}");
+                continue;
+            }
+        };
         if let Err(e) = hotkey::register(&key, action) {
             // Most likely another app holds the same shortcut.
             eprintln!("clipt: couldn't register the shortcut {spec}: {e:#}");
