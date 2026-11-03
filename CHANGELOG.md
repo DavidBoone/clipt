@@ -6,6 +6,8 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-03
+
 ### Added
 - macOS: a menu bar icon, which opening clipt.app starts, with the Linux
   tray's screenshot actions and Open at Login (macOS 13+), and global
