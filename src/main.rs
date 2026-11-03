@@ -220,11 +220,14 @@ fn run() -> Result<()> {
 }
 
 /// `clipt debug-icon [-o PATH]`: a contact sheet of the icon's sizes, or,
-/// for a PATH ending in .icns, the macOS app icon (packaging/macos uses it).
+/// for a PATH ending in .iconset, the macOS app icon's PNGs, which
+/// packaging/macos turns into an .icns with `iconutil`.
 fn debug_icon(args: &Args) -> Result<()> {
     let out = args.output.as_deref().unwrap_or("clipt-icon-preview.png");
-    let bytes = if out.ends_with(".icns") { icon::icns()? } else { icon::preview().encode_png()? };
-    std::fs::write(out, bytes)?;
+    if out.ends_with(".iconset") {
+        return icon::iconset(std::path::Path::new(out));
+    }
+    std::fs::write(out, icon::preview().encode_png()?)?;
     Ok(())
 }
 

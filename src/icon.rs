@@ -188,40 +188,24 @@ fn to_image(pm: &Pixmap) -> crate::image::Image {
     img
 }
 
-/// The macOS app icon as an .icns file: PNGs from 16 to 1024 px. Like
-/// Apple's own icons, the badge fills the middle 824/1024 of the canvas,
-/// leaving room for the system's shadow.
-pub fn icns() -> anyhow::Result<Vec<u8>> {
-    // (type, pixels): the 1x and 2x sizes of 16, 32, 128, 256 and 512 pt.
-    const ENTRIES: [(&[u8; 4], u32); 10] = [
-        (b"icp4", 16),
-        (b"ic11", 32),
-        (b"icp5", 32),
-        (b"ic12", 64),
-        (b"ic07", 128),
-        (b"ic13", 256),
-        (b"ic08", 256),
-        (b"ic14", 512),
-        (b"ic09", 512),
-        (b"ic10", 1024),
-    ];
-    let mut body = Vec::new();
-    for (kind, size) in ENTRIES {
-        // The drawing's badge spans 92 of its 100 units.
-        let draw = (size as f32 * 824.0 / 1024.0 * 100.0 / 92.0).round() as u32;
-        let mut canvas = Pixmap::new(size, size).expect("non-zero icon size");
-        let off = (size as i32 - draw as i32) / 2;
-        canvas.draw_pixmap(off, off, render(draw).as_ref(), &tiny_skia::PixmapPaint::default(), Transform::identity(), None);
-        let png = to_image(&canvas).encode_png()?;
-        body.extend_from_slice(kind);
-        body.extend_from_slice(&(png.len() as u32 + 8).to_be_bytes());
-        body.extend_from_slice(&png);
+/// The macOS app icon as an .iconset directory, for `iconutil -c icns`:
+/// PNGs from 16 to 1024 px. Like Apple's own icons, the badge fills the
+/// middle 824/1024 of the canvas, leaving room for the system's shadow.
+pub fn iconset(dir: &std::path::Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for pt in [16u32, 32, 128, 256, 512] {
+        for scale in [1u32, 2] {
+            let size = pt * scale;
+            // The drawing's badge spans 92 of its 100 units.
+            let draw = (size as f32 * 824.0 / 1024.0 * 100.0 / 92.0).round() as u32;
+            let mut canvas = Pixmap::new(size, size).expect("non-zero icon size");
+            let off = (size as i32 - draw as i32) / 2;
+            canvas.draw_pixmap(off, off, render(draw).as_ref(), &tiny_skia::PixmapPaint::default(), Transform::identity(), None);
+            let name = if scale == 1 { format!("icon_{pt}x{pt}.png") } else { format!("icon_{pt}x{pt}@2x.png") };
+            std::fs::write(dir.join(name), to_image(&canvas).encode_png()?)?;
+        }
     }
-    let mut out = Vec::with_capacity(body.len() + 8);
-    out.extend_from_slice(b"icns");
-    out.extend_from_slice(&(body.len() as u32 + 8).to_be_bytes());
-    out.extend_from_slice(&body);
-    Ok(out)
+    Ok(())
 }
 
 fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> tiny_skia::Path {

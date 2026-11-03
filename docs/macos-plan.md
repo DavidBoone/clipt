@@ -57,7 +57,7 @@ microphone, fed to the writer as PulseAudio is now.
 
 **App bundle.** `packaging/macos/build-app.sh` wraps the binary in
 `clipt.app` (bundle ID `io.github.jasondyck.clipt`, no Dock icon, the icon
-from `clipt debug-icon -o clipt.icns`). macOS then files the Screen
+drawn by `clipt debug-icon -o clipt.iconset` and packed by `iconutil`). macOS then files the Screen
 Recording permission under clipt itself, not the terminal or launcher that
 ran it, and the app can live in Applications and Login Items. CI uploads it
 as `clipt-app.zip` inside the `clipt-macos` artifact; releases carry
