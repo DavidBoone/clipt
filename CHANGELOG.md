@@ -17,6 +17,9 @@ All notable changes are listed here. The format follows
 - The tray menu ticks *Record as GIF*, *Copy when saving* and
   *Notifications*, saved in the config, and *Settings…* opens the config
   file. The macOS menu bar has the last three.
+- macOS: clicking a window in the screenshot overlay brings it to the
+  front: it's captured on its own, so the parts other windows covered show
+  and are saved.
 - macOS: recording, without sound so far (macOS 12.3+, and ffmpeg from
   Homebrew). `clipt record` picks an area or window as on Linux; `record
   screen`, `record window APP`, `-g`, `--stop` and `--pause` work too, and

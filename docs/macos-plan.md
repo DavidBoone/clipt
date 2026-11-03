@@ -67,6 +67,13 @@ recording, Pause and Stop, and turns into a red record symbol. Not yet:
 a frame around the area being recorded (the main thread is busy writing,
 and AppKit draws only there), and sound, whose toggles the overlay hides.
 
+**Whole windows in screenshots.** The overlay shows the screen as it was
+when it opened, so a covered window would be saved covered. Clicking a
+window (`src/macos/window_shot.rs`) captures it on its own and paints it
+over that picture (`Editor::paste`), as if brought to the front: with
+ScreenCaptureKit's `SCScreenshotManager` from macOS 14, and before that
+`CGWindowListCreateImage`, looked up at run time.
+
 **4. Sound.** ScreenCaptureKit's system audio (macOS 13+) and the
 microphone, fed to the writer as PulseAudio is now.
 

@@ -33,16 +33,16 @@ use std::time::Duration;
 
 /// How long ScreenCaptureKit may take to list what's on screen, or to
 /// start and stop a stream. It answers in milliseconds; this is for a hang.
-const REPLY_LIMIT: Duration = Duration::from_secs(10);
+pub(super) const REPLY_LIMIT: Duration = Duration::from_secs(10);
 
 /// Objective-C objects made on the main thread and used on the capture
 /// thread. ScreenCaptureKit's objects are thread-safe; Rust can't know it.
-struct Sendable<T>(T);
+pub(super) struct Sendable<T>(pub(super) T);
 unsafe impl<T> Send for Sendable<T> {}
 
 impl<T> Sendable<T> {
     /// A method, so a closure captures the whole wrapper, not its field.
-    fn into_inner(self) -> T {
+    pub(super) fn into_inner(self) -> T {
         self.0
     }
 }
@@ -123,12 +123,12 @@ fn copy_frame(buffer: &CMSampleBuffer) -> Option<VideoFrame> {
 }
 
 /// An NSError from a completion handler, as text; `None` for no error.
-fn error_text(e: *mut NSError) -> Option<String> {
+pub(super) fn error_text(e: *mut NSError) -> Option<String> {
     unsafe { e.as_ref() }.map(|e| e.localizedDescription().to_string())
 }
 
 /// What's on screen now: displays and windows.
-fn shareable_content() -> Result<Retained<SCShareableContent>> {
+pub(super) fn shareable_content() -> Result<Retained<SCShareableContent>> {
     let (tx, rx) = mpsc::channel();
     let handler = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
         let r = match unsafe { Retained::retain(content) } {

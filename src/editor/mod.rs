@@ -1254,6 +1254,35 @@ fn snap45(a: Pt, b: Pt) -> Pt {
     (a.0 + len * ang.cos(), a.1 + len * ang.sin())
 }
 
+impl Editor {
+    /// Paint `img` (premultiplied RGBA, `scale` pixels per point) over the
+    /// frozen screens at `rect`, in desktop coordinates: a window captured
+    /// on its own, so the parts other windows covered show and are saved.
+    /// The caller redraws everything. macOS only so far.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn paste(&mut self, rect: Rect, img: Image, scale: f32) {
+        let mut data = img.data;
+        if self.swap_rb {
+            for p in data.as_chunks_mut::<4>().0 {
+                p.swap(0, 2);
+            }
+        }
+        let Some(pm) = tiny_skia::IntSize::from_wh(img.width, img.height).and_then(|size| Pixmap::from_vec(data, size)) else { return };
+        for s in &mut self.screens {
+            if s.bounds().intersect(&rect).is_none() {
+                continue;
+            }
+            let k = s.scale / scale;
+            let quality = if (k - 1.0).abs() < 1e-3 { FilterQuality::Nearest } else { FilterQuality::Bicubic };
+            let paint = PixmapPaint { quality, ..Default::default() };
+            let tx = ((rect.left() - s.output.x as f32) * s.scale).round();
+            let ty = ((rect.top() - s.output.y as f32) * s.scale).round();
+            s.bg.draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_row(k, 0.0, 0.0, k, tx, ty), None);
+        }
+        self.revision += 1;
+    }
+}
+
 fn to_pixmap(img: Image, swap_rb: bool) -> Pixmap {
     let mut data = img.data;
     for p in data.as_chunks_mut::<4>().0 {
@@ -1292,6 +1321,26 @@ mod tests {
 
     fn editor(shots: Vec<Shot>, swap: bool) -> Editor {
         Editor::new(shots, Fonts::load(None).expect("a system font"), swap, 0, 4.0)
+    }
+
+    #[test]
+    fn a_pasted_window_covers_the_frozen_screen_and_is_saved() {
+        // A 1x screen beside a 2x one; a 20x10-point window across both,
+        // captured at 2x, red.
+        let mut ed = editor(vec![shot("A", 0, 100, 50, 1, [0, 0, 0]), shot("B", 100, 100, 50, 2, [0, 0, 0])], true);
+        let mut img = Image::new(40, 20);
+        for p in img.data.as_chunks_mut::<4>().0 {
+            *p = [255, 0, 0, 255];
+        }
+        ed.paste(Rect::from_xywh(90.0, 10.0, 20.0, 10.0).unwrap(), img, 2.0);
+        // swap_rb: the background is BGRA, so red is the third byte.
+        let px = |s: &Screen, x: u32, y: u32| s.bg.pixel(x, y).map(|c| (c.red(), c.blue()));
+        assert_eq!(px(&ed.screens[0], 95, 15), Some((0, 255)), "on the 1x screen");
+        assert_eq!(px(&ed.screens[1], 10, 30), Some((0, 255)), "on the 2x screen, at its scale");
+        assert_eq!(px(&ed.screens[0], 50, 15), Some((0, 0)), "elsewhere untouched");
+        drag(&mut ed, (92.0, 12.0), (108.0, 18.0));
+        let out = ed.export().unwrap();
+        assert_eq!(&out.data[..4], &[255, 0, 0, 255], "and it's what gets saved");
     }
 
     fn drag(ed: &mut Editor, a: Pt, b: Pt) {
