@@ -199,15 +199,18 @@ gdbus call --session --dest org.freedesktop.impl.portal.PermissionStore \
 
 ### macOS (preview)
 
-Screenshots work on macOS (recording, the menu bar icon and `clipt update`
-don't yet), but no one has tried them on a real Mac. Builds come from the
-`macos` CI job (the `clipt-macos` artifact), signed with a Developer ID
-and notarised by Apple:
+Screenshots work on macOS (recording and the menu bar icon don't yet), but
+no one has tried them on a real Mac. Each release has a universal binary,
+`clipt-vX.Y.Z-universal-macos.tar.gz`, signed with a Developer ID and
+notarised by Apple; put `clipt` somewhere on your `PATH`, and `clipt update`
+keeps it current:
 
 ```
-chmod +x clipt
-./clipt full -o test.png              # macOS asks to allow Screen Recording once
+tar xzf clipt-*-universal-macos.tar.gz
+./clipt-*-universal-macos/clipt full -o test.png   # macOS asks to allow Screen Recording once
 ```
+
+Builds of `main` come from the `macos` CI job (the `clipt-macos` artifact).
 
 ⌘ takes the place of Ctrl in the editor (⌘C copies, ⌘S saves, ⌘Z undoes).
 [docs/macos-plan.md](docs/macos-plan.md) has what's done, what's next, and
