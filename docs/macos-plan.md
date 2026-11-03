@@ -1,0 +1,84 @@
+# macOS: plan and status
+
+Status, 2026-11-02: phase 1 (screenshots) is written and builds and passes
+its unit tests on CI's Macs. Nobody has run it on a real Mac yet, so treat it
+as a preview until a tester has worked through the checklist below.
+
+## Goal
+
+The same clipt on macOS 12 and later, on Apple silicon and Intel: select a
+region, a window or a display, annotate, copy or save; later, record. One
+binary, nothing to install beside it except ffmpeg for recording.
+
+## How it fits
+
+The editor (`src/editor/`), images, text, the config and PNG output are
+shared. macOS gets its own host in `src/macos/`, beside the Wayland and
+X11 ones, and the Linux-only code and crates are behind
+`cfg(not(target_os = "macos"))`.
+
+| Part | Linux | macOS |
+|---|---|---|
+| Displays | Wayland outputs, RandR | `CGGetActiveDisplayList`, `CGDisplayBounds`, names from `NSScreen` |
+| Screenshots | `capture/` | `CGDisplayCreateImage`, drawn into sRGB; `screencapture` as the fallback and for `--cursor` |
+| Showing the editor | `overlay.rs`, `x11/overlay.rs` | `macos/overlay.rs`: a borderless window per display at screen-saver level, a layer showing the editor's bitmap |
+| Window picker | `windows/linux.rs` | `CGWindowListCopyWindowInfo` (layer 0, frontmost first) |
+| Clipboard | Wayland and X11 selections, which clipt serves | `NSPasteboard` (PNG and TIFF); the system keeps it, so clipt exits at once |
+| Fonts | `fc-match` | Arial from `/System/Library/Fonts/Supplemental` |
+| Notifications | D-Bus | `osascript` (`display notification`) |
+| Shortcuts | ⌃C ⌃S ⌃Z | ⌘C ⌘S ⌘Z (⌃ works too) |
+
+Decisions:
+
+| Question | Decision | Why |
+|---|---|---|
+| Bindings | `objc2` and its framework crates | Safe, maintained bindings to frameworks every Mac has, so the no-new-C-libraries rule holds |
+| Capture | Core Graphics, not ScreenCaptureKit | Synchronous, no run loop or async completion handlers, and on every macOS clipt targets. It's deprecated, so it's looked up at run time (`dlsym`), and `screencapture` takes over if it ever goes. Recording will need ScreenCaptureKit anyway |
+| Event loop | clipt's own `nextEventMatchingMask` loop | `run` returns when the user decides, like the other hosts |
+| Permission | Checked first (`CGPreflightScreenCaptureAccess`), with the system prompt on the first run | Without it macOS returns screenshots with every window blank, which looks like a bug |
+
+## Phases
+
+**1. Screenshots (this one).** `clipt`, `clipt full`, `clipt screen`,
+`clipt list`, copy, save, notifications, window highlighting. CI builds a
+universal binary (`clipt-macos` artifact on each run of the `macos` job).
+
+**2. Menu bar icon and a hotkey.** `clipt tray` as an `NSStatusItem` with the
+Linux tray's menu, holding a global shortcut (`RegisterEventHotKey`, which
+needs no accessibility permission). Until then, a shortcut can run clipt
+through the Shortcuts app or a tool like skhd.
+
+**3. Recording.** ScreenCaptureKit (`SCStream`, macOS 12.3+) for frames,
+ffmpeg's `h264_videotoolbox` encoder, the writer and camera as they are;
+`--stop` and `--pause` over the same pid file and FIFO as Linux.
+
+**4. Sound.** ScreenCaptureKit's system audio (macOS 13+) and the
+microphone, fed to the writer as PulseAudio is now.
+
+**5. Release.** A universal tarball on GitHub releases, and `clipt update`
+for it. Signing and notarisation need the Apple Developer Program (US$99 a
+year); without it, a downloaded binary needs its quarantine flag cleared
+(see the README).
+
+## Testing
+
+CI can't show a screen to anyone, so phase 1 needs a person with a Mac:
+
+1. Download `clipt-macos` from the latest run of the `macos` CI job, unzip
+   it, then `xattr -d com.apple.quarantine clipt` and `chmod +x clipt`.
+2. `./clipt --version` and `./clipt list`: each display, with its size.
+3. `./clipt full -o test.png`: the first time, macOS asks to allow Screen
+   Recording for the terminal; allow it, quit and reopen the terminal, run
+   it again. The PNG should show every window, at full Retina resolution.
+4. `./clipt`: the screen freezes on every display. Check that the pointer
+   highlights windows, a drag selects, the toolbar's tools draw, ⌘Z undoes,
+   Return copies (paste into Notes, Mail, Messages, Slack), ⌘S saves to
+   `~/Pictures/Screenshots`, Esc cancels.
+5. Keys work without clicking first. If they only work after a click,
+   that's macOS refusing clipt focus, and worth reporting.
+6. With two displays, especially a Retina one next to a non-Retina one:
+   selections on each and across both.
+7. A full-screen app on its own Space: the overlay should cover it.
+
+Report what you see in the PR or an issue, with `CLIPT_DEBUG=1` output for
+anything odd.
