@@ -48,9 +48,18 @@ impl Fonts {
     }
 }
 
+/// Regular and bold sans-serif paths. macOS has no fontconfig, but every
+/// release since 10.15 ships Arial here (Helvetica comes as a collection
+/// whose first face is the only one read).
+#[cfg(target_os = "macos")]
+fn resolve() -> [Option<String>; 2] {
+    ["/System/Library/Fonts/Supplemental/Arial.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf"].map(|p| Some(p.to_string()))
+}
+
 /// Regular and bold sans-serif paths. Asking fontconfig means spawning
 /// fc-match (~8 ms each), which dominates startup on compositors with fast
 /// capture, so the answer is cached until one of the files disappears.
+#[cfg(not(target_os = "macos"))]
 fn resolve() -> [Option<String>; 2] {
     let cache = std::env::var_os("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
@@ -91,6 +100,8 @@ const FALLBACKS: &[&str] = &[
     "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
     "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
     "/usr/share/fonts/cantarell/Cantarell-VF.otf",
+    "/Library/Fonts/Arial.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
 ];
 
 /// Width of a single line in pixels.
