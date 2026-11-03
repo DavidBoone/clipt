@@ -166,6 +166,7 @@ pub(crate) fn capture(target: &Target, cursor: bool, interval: Duration) -> Resu
             let (out, _) = crate::record::resolve_target(&outputs, target)?;
             let frame = unsafe { win.frame() };
             let scale = scale(&out);
+            crate::record::debug(&format!("recording window {id} ({} — {}) on its own", w.app, w.title));
             let filter = unsafe { SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &win) };
             unsafe { config.setIgnoreShadowsSingleWindow(true) };
             (filter, (frame.size.width * scale, frame.size.height * scale))
@@ -181,6 +182,7 @@ pub(crate) fn capture(target: &Target, cursor: bool, interval: Duration) -> Resu
                 })
                 .with_context(|| format!("ScreenCaptureKit doesn't list display {}", out.name))?;
             let (x, y, w, h) = crop.unwrap_or((0.0, 0.0, out.width as f64, out.height as f64));
+            crate::record::debug(&format!("recording {w}x{h} at {x},{y} of display {}", out.name));
             unsafe { config.setSourceRect(CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))) };
             let scale = scale(&out);
             let filter = unsafe { SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &display, &NSArray::new()) };
