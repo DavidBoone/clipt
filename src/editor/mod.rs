@@ -1448,7 +1448,7 @@ mod tests {
         // Where there's no sound to record (macOS, for now): no toggles.
         ed.can_sound = false;
         let (_, buttons) = ui::toolbar_layout(&ed).unwrap();
-        assert_eq!(buttons.iter().map(|b| b.1).collect::<Vec<_>>(), vec![ui::Button::Record, ui::Button::Close]);
+        assert_eq!(buttons.iter().map(|b| b.1).collect::<Vec<_>>(), vec![ui::Button::Record, ui::Button::Gif, ui::Button::Close]);
         let before = ed.sound;
         ed.key(Key::Char('s'), Mods::default());
         assert_eq!(ed.sound, before, "nor the S key");
