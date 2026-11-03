@@ -16,6 +16,11 @@ All notable changes are listed here. The format follows
 ### Fixed
 - Pixelating over a shape made the shape vanish: the blocks came from the
   screenshot alone. They now blur whatever is underneath, drawings included.
+- Text landed half a line below the click. It's now centred on the click,
+  where the text pointer points; a faint cursor at the text's size and
+  colour shows where it will go before clicking, and while typing the
+  cursor has a contrasting edge and the text a faint box, so both show on
+  any background.
 
 ## [0.6.0] - 2026-11-03
 

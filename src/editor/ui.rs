@@ -286,6 +286,16 @@ pub fn dynamic_layers(ed: &Editor, frame: u64) -> Vec<Layer> {
         None => (0, None),
     };
     layers.push(Layer { key: k, rects: grow(vec![r]) });
+
+    // where a click would start text
+    let (k, r) = match ed.text_ghost() {
+        Some(p) => {
+            let lh = text::line_height(ed.fonts.bold(), ed.text_size());
+            (key(&[p.0, p.1, ed.text_size(), ed.color as f32]), Rect::from_xywh(p.0 - 2.0, p.1 - lh / 2.0 - 2.0, 6.0, lh + 4.0))
+        }
+        None => (0, None),
+    };
+    layers.push(Layer { key: k, rects: grow(vec![r]) });
     layers
 }
 
@@ -317,7 +327,20 @@ pub fn render(ed: &Editor, idx: usize, pm: &mut PixmapMut, origin: (i32, i32)) {
         let lh = text::line_height(ed.fonts.bold(), size * s) / s;
         let cx = te.pos.0 + text::measure(ed.fonts.bold(), size * s, last) / s + 1.0;
         let cy = te.pos.1 + lines * lh;
-        fill_rect(pm, &view, Rect::from_xywh(cx, cy, 2.0, lh), ed.current_color());
+        // A faint box shows what's being typed, and where.
+        let w = te.text.split('\n').map(|l| text::measure(ed.fonts.bold(), size * s, l) / s).fold(0.0, f32::max);
+        if let Some(r) = Rect::from_xywh(te.pos.0 - 5.0, te.pos.1 - 3.0, w + 12.0, (lines + 1.0) * lh + 6.0) {
+            let path = rounded(&view, r, 4.0);
+            let id = Transform::identity();
+            let st = |w: f32| Stroke { width: w * s, ..Default::default() };
+            pm.stroke_path(&path, &view.paint(Color::from_rgba8(0, 0, 0, 90)), &st(3.0), id, None);
+            pm.stroke_path(&path, &view.paint(Color::from_rgba8(255, 255, 255, 170)), &st(1.0), id, None);
+        }
+        text_cursor(pm, &view, (cx, cy), lh, ed.current_color(), 1.0);
+    }
+    if let Some(p) = ed.text_ghost() {
+        let lh = text::line_height(ed.fonts.bold(), ed.text_size() * s) / s;
+        text_cursor(pm, &view, (p.0, p.1 - lh / 2.0), lh, ed.current_color(), 0.55);
     }
 
     if let Some(sel) = ed.sel {
@@ -385,6 +408,20 @@ fn background(ed: &Editor, idx: usize, pm: &mut PixmapMut, origin: (i32, i32)) {
             _ => dim_copy(drow, srow),
         }
     }
+}
+
+/// A text cursor `h` tall with its top at `p`, edged in black or white,
+/// whichever stands out from its colour, so it shows on any background.
+fn text_cursor(pm: &mut PixmapMut, view: &View, p: Pt, h: f32, c: Color, alpha: f32) {
+    let edge = if super::shapes::luminance(c) > 0.5 {
+        Color::from_rgba(0.0, 0.0, 0.0, 0.7 * alpha)
+    } else {
+        Color::from_rgba(1.0, 1.0, 1.0, 0.85 * alpha)
+    };
+    let mut c = c;
+    c.set_alpha(alpha);
+    fill_rect(pm, view, Rect::from_xywh(p.0 - 1.0, p.1 - 1.0, 4.0, h + 2.0), edge.unwrap_or(Color::BLACK));
+    fill_rect(pm, view, Rect::from_xywh(p.0, p.1, 2.0, h), c);
 }
 
 fn draw_selection(ed: &Editor, pm: &mut PixmapMut, view: &View, sel: Rect) {

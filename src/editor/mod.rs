@@ -359,6 +359,19 @@ impl Editor {
         matches!(self.drag, Drag::Creating { .. } | Drag::Moving { .. } | Drag::Resizing { .. })
     }
 
+    /// Where a click would start text, shown as a faint cursor at the text's
+    /// real size before clicking.
+    pub fn text_ghost(&self) -> Option<Pt> {
+        let p = self.pointer;
+        (self.tool == Tool::Text
+            && self.pointer_in
+            && !self.record
+            && matches!(self.drag, Drag::None)
+            && ui::toolbar_hit(self, p).is_none()
+            && ui::mode_switch_hit(self, p).is_none())
+        .then_some(p)
+    }
+
     pub fn in_progress(&self) -> Option<&Shape> {
         match &self.drag {
             Drag::Drawing(s) => Some(s),
@@ -559,7 +572,10 @@ impl Editor {
             }
             Tool::Text => {
                 self.commit_text();
-                self.text = Some(TextEdit { pos: p, text: String::new() });
+                // The I-beam's middle is where people aim: centre the first
+                // line on the click, not hang the text below it.
+                let lh = crate::text::line_height(self.fonts.bold(), self.text_size());
+                self.text = Some(TextEdit { pos: (p.0, p.1 - lh / 2.0), text: String::new() });
             }
             tool => {
                 self.commit_text();
@@ -1156,6 +1172,25 @@ mod tests {
         assert_eq!(ed.outcome, Some(Outcome::Copy));
     }
 
+    /// Text is centred on the click, the way the I-beam pointer suggests,
+    /// and a faint cursor shows where it would go before clicking.
+    #[test]
+    fn text_lands_where_the_pointer_points() {
+        let mut ed = editor(vec![shot("A", 0, 400, 300, 1, [0, 0, 0])], false);
+        drag(&mut ed, (0.0, 0.0), (300.0, 200.0));
+        ed.tool = Tool::Text;
+        ed.pointer_motion((100.0, 100.0), Mods::default());
+        assert_eq!(ed.text_ghost(), Some((100.0, 100.0)));
+        ed.button_press((100.0, 100.0), true, Mods::default());
+        let lh = crate::text::line_height(ed.fonts.bold(), ed.text_size());
+        let pos = ed.text.as_ref().unwrap().pos;
+        assert_eq!(pos, (100.0, 100.0 - lh / 2.0), "the first line's middle is the click");
+        let (_, btns) = ui::toolbar_layout(&ed).unwrap();
+        let r = btns[0].0;
+        ed.pointer_motion((r.left() + 5.0, r.top() + 5.0), Mods::default());
+        assert_eq!(ed.text_ghost(), None, "not over the toolbar");
+    }
+
     /// Replays a session the way the overlay does (one persistent buffer,
     /// repainting only damaged rects) and checks the result matches a full
     /// redraw: any region the damage tracking misses shows up as a diff.
@@ -1351,6 +1386,11 @@ mod tests {
         step(&mut ed, &|e| {
             e.tool = Tool::Text;
         });
+        for i in 0..3 {
+            step(&mut ed, &|e| {
+                e.pointer_motion((100.0 + i as f32 * 10.0, 230.0 + i as f32 * 5.0), m);
+            });
+        }
         step(&mut ed, &|e| {
             e.button_press((120.0, 240.0), true, m);
         });
