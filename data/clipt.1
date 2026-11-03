@@ -63,8 +63,9 @@ description, marking the ones \fBsystem\fR and \fBmic\fR stand for.
 .B record
 Open the selection overlay in record mode: drag an area, or click a window
 or screen, then press \fBEnter\fR to start.
-On wlroots compositors a red frame outside the recorded area marks it; the
+A red frame outside the recorded area marks it (amber while paused); the
 frame is not in the video.
+GNOME draws it only with clipt's extension (\fBgnome\-extension\fR).
 The toolbar's speaker and microphone buttons (\fBS\fR and \fBM\fR) turn
 the computer's sound and the microphone on or off for this recording; they
 start from \fB\-\-audio\fR or \fBrecord_audio\fR, and other sources listed
@@ -111,10 +112,11 @@ Each capture runs as a fresh clipt process.
 .TP
 \fBgnome\-extension\fR
 Install, for this user, the GNOME Shell extension that tells clipt where
-windows are, and enable it; GNOME Shell on Wayland loads it after you log
-out and back in.
-GNOME gives applications no other way to know, so without it the overlay
-highlights only whole monitors there.
+windows are and draws the frame around a recording, and enable it; GNOME
+Shell on Wayland loads it after you log out and back in, also after an
+update that changes it.
+GNOME gives applications no other way to do either, so without it the
+overlay highlights only whole monitors there, and recordings have no frame.
 The extension answers only a program named clipt.
 Remove it with \fBgnome\-extensions uninstall clipt\-windows@jasondyck.github.io\fR.
 .TP

@@ -104,7 +104,8 @@ window under the pointer (KDE, Sway, Hyprland and X11), or the whole screen
 over bare desktop. **Tab** switches between the window and its screen.
 GNOME doesn't let other apps see window positions, so there the highlight
 is always the screen, unless you install clipt's small GNOME Shell
-extension, which tells clipt alone where windows are:
+extension, which tells clipt alone where windows are (and draws the frame
+around a recording, which GNOME otherwise has no way to show):
 
 ```
 clipt gnome-extension    # install and enable it; log out and back in once

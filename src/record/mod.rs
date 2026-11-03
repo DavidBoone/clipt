@@ -641,8 +641,8 @@ fn gnome_source(outputs: &[Output], target: &Target) -> Result<Picked> {
         t => {
             let (o, crop) = resolve_target(outputs, t)?;
             let c = crop.unwrap_or((0.0, 0.0, o.width as f64, o.height as f64));
-            // No frame: GNOME has no layer-shell to draw it with.
-            (Source::Gnome(G::Area((c.0 + o.x as f64, c.1 + o.y as f64, c.2, c.3))), false, None, None)
+            // The frame comes from clipt's GNOME Shell extension, if it's there.
+            (Source::Gnome(G::Area((c.0 + o.x as f64, c.1 + o.y as f64, c.2, c.3))), false, None, crop.map(|c| (o, c)))
         }
     })
 }
