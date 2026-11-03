@@ -112,6 +112,7 @@ jobs:
           lipo -create -output dist/clipt target/aarch64-apple-darwin/release/clipt target/x86_64-apple-darwin/release/clipt
           # An ad-hoc signature: Apple silicon runs nothing unsigned.
           codesign --force --sign - dist/clipt
+          packaging/macos/build-app.sh dist/clipt dist
       - name: sign and notarise
         if: env.SIGN == 'true'
         env:
@@ -120,7 +121,7 @@ jobs:
           MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
           MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
           MACOS_NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
-        run: .github/scripts/macos-sign.sh dist/clipt
+        run: .github/scripts/macos-sign.sh dist/clipt dist/clipt.app
       - run: |
           codesign --display --verbose=2 dist/clipt 2>&1 | grep -E "^(Authority|TeamIdentifier|Signature)" || true
           dist/clipt --version
@@ -132,6 +133,11 @@ jobs:
         run: |
           dist/clipt full -o dist/full.png
           file dist/full.png
+      # Zipped with ditto: an artifact upload drops the executable bit, and
+      # with it the app.
+      - run: |
+          ditto -c -k --keepParent dist/clipt.app dist/clipt-app.zip
+          rm -rf dist/clipt.app
       - uses: actions/upload-artifact@v7
         with:
           name: clipt-macos

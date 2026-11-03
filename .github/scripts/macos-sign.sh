@@ -1,11 +1,17 @@
 #!/bin/bash
-# Sign a macOS binary with the Developer ID and have Apple notarise it.
-# Usage: macos-sign.sh BINARY [WAIT], WAIT being how long to wait for Apple
-# (notarytool's --timeout, default 10m). Reads the MACOS_* secrets from the
-# environment; docs/macos-plan.md lists them.
+# Sign macOS binaries and app bundles with the Developer ID and have Apple
+# notarise them, in one submission.
+# Usage: macos-sign.sh [--wait WAIT] PATH..., WAIT being how long to wait for
+# Apple (notarytool's --timeout, default 10m). An accepted app bundle gets
+# the ticket stapled, so it opens offline the first time too. Reads the
+# MACOS_* secrets from the environment; docs/macos-plan.md lists them.
 set -euo pipefail
-bin=$1
-wait=${2:-10m}
+wait=10m
+if [ "${1:-}" = --wait ]; then
+  wait=$2
+  shift 2
+fi
+paths=("$@")
 
 # A throwaway keychain holding only the certificate.
 kc="$RUNNER_TEMP/signing.keychain-db"
@@ -20,14 +26,20 @@ rm "$RUNNER_TEMP/cert.p12"
 security set-key-partition-list -S apple-tool:,apple: -s -k "$kcpw" "$kc" > /dev/null
 security list-keychains -d user -s "$kc"
 # Notarisation needs the hardened runtime and a secure timestamp.
-codesign --force --options runtime --timestamp --keychain "$kc" --sign "Developer ID Application" "$bin"
-codesign --verify --strict --verbose=2 "$bin"
+for p in "${paths[@]}"; do
+  codesign --force --options runtime --timestamp --keychain "$kc" --sign "Developer ID Application" "$p"
+  codesign --verify --strict --verbose=2 "$p"
+done
 
 printf '%s\n' "$MACOS_NOTARY_KEY" > "$RUNNER_TEMP/notary.p8"
-ditto -c -k "$bin" "$RUNNER_TEMP/clipt.zip"
+mkdir "$RUNNER_TEMP/notarise"
+for p in "${paths[@]}"; do ditto "$p" "$RUNNER_TEMP/notarise/$(basename "$p")"; done
+ditto -c -k "$RUNNER_TEMP/notarise" "$RUNNER_TEMP/clipt.zip"
+rm -rf "$RUNNER_TEMP/notarise"
 # Apple's queue can take far longer than a job should wait, but a bare
 # binary's notarisation is looked up online when it first runs, so the
-# build counts as notarised once Apple accepts it. Wait a while, then hand
+# build counts as notarised once Apple accepts it. (A bundle's stapled
+# ticket only comes with an accepted submission.) Wait a while, then hand
 # it over with the submission's id; the notary workflow can check it later.
 auth=(--key "$RUNNER_TEMP/notary.p8" --key-id "$MACOS_NOTARY_KEY_ID" --issuer "$MACOS_NOTARY_ISSUER")
 xcrun notarytool submit "$RUNNER_TEMP/clipt.zip" "${auth[@]}" --output-format json > "$RUNNER_TEMP/notary.json"
@@ -38,7 +50,11 @@ xcrun notarytool info "$id" "${auth[@]}" --output-format json > "$RUNNER_TEMP/no
 status=$(plutil -extract status raw "$RUNNER_TEMP/notary.json")
 echo "notarisation status: $status"
 case "$status" in
-  Accepted) ;;
+  Accepted)
+    for p in "${paths[@]}"; do
+      if [[ $p == *.app ]]; then xcrun stapler staple "$p"; fi
+    done
+    ;;
   "In Progress") echo "::warning::Apple is still notarising submission $id; the build will pass Gatekeeper once it's accepted" ;;
   *)
     xcrun notarytool log "$id" "${auth[@]}"

@@ -55,6 +55,17 @@ ffmpeg's `h264_videotoolbox` encoder, the writer and camera as they are;
 **4. Sound.** ScreenCaptureKit's system audio (macOS 13+) and the
 microphone, fed to the writer as PulseAudio is now.
 
+**App bundle.** `packaging/macos/build-app.sh` wraps the binary in
+`clipt.app` (bundle ID `io.github.jasondyck.clipt`, no Dock icon, the icon
+from `clipt debug-icon -o clipt.icns`). macOS then files the Screen
+Recording permission under clipt itself, not the terminal or launcher that
+ran it, and the app can live in Applications and Login Items. CI uploads it
+as `clipt-app.zip` inside the `clipt-macos` artifact; releases carry
+`clipt-vX.Y.Z-macos-app.zip`, notarised with the bare binary in one
+submission and stapled. Opened from Finder it starts the editor; once the
+menu bar icon exists it will start that instead. Keep the bundle ID: a
+new one makes macOS ask every user for the permission again.
+
 **5. Release.** Done ahead of the others: the release workflow adds a
 signed and notarised universal tarball (`clipt-vX.Y.Z-universal-macos.tar.gz`)
 to each GitHub release, and `clipt update` installs it.
