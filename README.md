@@ -60,6 +60,7 @@ clipt full -g "$(slurp)" -o -   # slurp region to stdout
 clipt list          # outputs and available backends
 clipt tray          # tray icon: click = region, right-click = menu
 clipt update        # update to the latest release (--check: just check)
+clipt config        # list the settings; clipt config KEY VALUE sets one
 clipt record        # pick an area to record, Enter starts
 clipt record --stop # ...and stop it (or Ctrl-C, or click the tray icon)
 clipt record --audio # with the sound the computer is playing
@@ -145,7 +146,9 @@ something else is copied (Wayland clipboards are owned by a live client).
 
 ## Config
 
-`~/.config/clipt/config.toml`, every key optional:
+`~/.config/clipt/config.toml`, every key optional. `clipt config` lists
+them with their values, and `clipt config record_format gif` sets one
+without touching the rest of the file:
 
 ```toml
 save_dir = "~/Pictures/Screenshots"

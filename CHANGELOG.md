@@ -6,6 +6,12 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `clipt config` lists the settings with their values;
+  `clipt config KEY` shows one and `clipt config KEY VALUE` sets it (for
+  example `clipt config record_format gif`), keeping the file's comments
+  and other keys, and refusing values the setting can't take.
+
 ### Changed
 - The Copy button's tooltip shows Ctrl+C rather than Enter (both still copy).
 

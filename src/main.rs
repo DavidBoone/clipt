@@ -65,6 +65,8 @@ USAGE:
     clipt record --pause / --resume / --toggle-pause
     clipt tray            Sit in the system tray (click: region, right-click: menu)
     clipt update          Update to the latest release (--check: only check)
+    clipt config [KEY [VALUE]]  Show the settings, one setting, or set it,
+                          e.g. clipt config record_format gif
     clipt gnome-extension Install the GNOME Shell extension that lets the
                           overlay highlight windows on GNOME
 
@@ -136,6 +138,8 @@ struct Args {
     /// --audio-balance=MODE.
     audio_balance: Option<String>,
     separate_audio: bool,
+    /// `clipt config [KEY [VALUE]]`.
+    config: Vec<String>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -189,6 +193,10 @@ fn parse_args() -> Result<Args> {
                 a.record_mode = Some(v.string()?);
                 positional += 1;
             }
+            Value(v) if (1..=2).contains(&positional) && a.cmd == "config" => {
+                a.config.push(v.string()?);
+                positional += 1;
+            }
             Value(v) if positional == 2 && matches!(a.record_mode.as_deref(), Some("screen" | "window")) => {
                 a.screen = Some(v.string()?);
                 positional += 1;
@@ -197,6 +205,31 @@ fn parse_args() -> Result<Args> {
         }
     }
     Ok(a)
+}
+
+/// `clipt config`: every setting; `clipt config KEY`: one; `clipt config
+/// KEY VALUE`: set it in the config file.
+fn config_cmd(args: &Args) -> Result<()> {
+    match args.config.as_slice() {
+        [] => {
+            println!("# {}", Config::path().display());
+            print!("{}", Config::load()?.listing());
+        }
+        [key] => {
+            let cfg = Config::load()?;
+            match cfg.get(key) {
+                Some(v) => println!("{v}"),
+                None if key == "font" => println!("(not set)"),
+                None => anyhow::bail!("no setting '{key}'; `clipt config` lists them"),
+            }
+        }
+        [key, value] => {
+            Config::set(key, value)?;
+            println!("{key} = {}", Config::load()?.get(key).unwrap_or_default());
+        }
+        _ => unreachable!("parse_args takes at most two"),
+    }
+    Ok(())
 }
 
 fn main() {
@@ -215,6 +248,9 @@ fn run() -> Result<()> {
     let args = parse_args()?;
     if args.cmd == "debug-icon" {
         return debug_icon(&args);
+    }
+    if args.cmd == "config" {
+        return config_cmd(&args);
     }
     macos::run(args, Config::load()?)
 }
@@ -241,6 +277,9 @@ fn run() -> Result<()> {
         }
     };
     let mut args = parse_args()?;
+    if args.cmd == "config" {
+        return config_cmd(&args);
+    }
     let cfg = Config::load()?;
     let backend = match args.backend.as_deref().unwrap_or(&cfg.backend) {
         "auto" => None,

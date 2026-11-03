@@ -126,6 +126,14 @@ download it and replace the binary.
 Packaged installs are pointed at their package manager.
 With \fB\-\-check\fR, only report whether an update is available.
 Needs \fBcurl\fR.
+.TP
+\fBconfig\fR [\fIkey\fR [\fIvalue\fR]]
+Without arguments, list every setting with its value (as TOML).
+With a \fIkey\fR, print that setting's value.
+With a \fIvalue\fR as well, set it in \fIconfig.toml\fR, keeping the file's
+comments and other keys; a word that isn't a TOML value counts as a string,
+so \fBclipt config record_format gif\fR works.
+A value the setting can't take is refused and the file left alone.
 .SH OPTIONS
 Options may appear before or after the command.
 .TP
