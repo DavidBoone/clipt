@@ -1,8 +1,8 @@
 # macOS: plan and status
 
-Status, 2026-11-02: phase 1 (screenshots) is written and builds and passes
-its unit tests on CI's Macs. Nobody has run it on a real Mac yet, so treat it
-as a preview until a tester has worked through the checklist below.
+Status, 2026-11-03: phase 1 (screenshots) shipped in 0.6.0 and has run on
+one real Mac, where the overlay's lag was found and fixed. Treat it as a
+preview until a tester has worked through the checklist below.
 
 ## Goal
 

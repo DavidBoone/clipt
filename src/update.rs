@@ -41,6 +41,9 @@ pub enum Install {
     Nix,
     /// Flatpak: Flathub or the user's software centre updates it.
     Flatpak,
+    /// The binary inside clipt.app: replacing it alone would break the
+    /// bundle's signature, so a new app comes from the release page.
+    AppBundle,
     /// /usr/bin and friends: the distro package manager owns it.
     Package,
 }
@@ -51,6 +54,8 @@ impl Install {
         let s = exe.to_string_lossy();
         if flatpak() {
             Install::Flatpak
+        } else if s.contains(".app/Contents/MacOS/") {
+            Install::AppBundle
         } else if s.starts_with("/nix/store/") {
             Install::Nix
         } else if s.contains("/.cargo/bin/") {
@@ -71,6 +76,7 @@ impl Install {
             Install::Cargo => "run `cargo install clipt`",
             Install::Nix => "update your flake input",
             Install::Flatpak => "run `flatpak update` or use your software centre",
+            Install::AppBundle => "download the new clipt.app from the release page",
             Install::Package => "update it with your package manager",
         }
     }
