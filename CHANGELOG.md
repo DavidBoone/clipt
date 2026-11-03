@@ -17,6 +17,13 @@ All notable changes are listed here. The format follows
 - The tray menu ticks *Record as GIF*, *Copy when saving* and
   *Notifications*, saved in the config, and *Settings…* opens the config
   file. The macOS menu bar has the last three.
+- macOS: recording, without sound so far (macOS 12.3+, and ffmpeg from
+  Homebrew). `clipt record` picks an area or window as on Linux; `record
+  screen`, `record window APP`, `-g`, `--stop` and `--pause` work too, and
+  the menu bar icon gains Record Region, Record Screen, Pause and Stop,
+  turning red while a recording runs. Frames come from ScreenCaptureKit; a
+  window is recorded on its own, even while covered. Apple's hardware
+  encoder (`h264_videotoolbox`) is used on Apple silicon, libx264 otherwise.
 
 ### Changed
 - The Copy button's tooltip shows Ctrl+C rather than Enter (both still copy).

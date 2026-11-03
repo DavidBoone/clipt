@@ -19,7 +19,6 @@ mod macos;
 mod notify;
 #[cfg(not(target_os = "macos"))]
 mod overlay;
-#[cfg(not(target_os = "macos"))]
 mod record;
 #[cfg(not(target_os = "macos"))]
 mod session;
@@ -130,7 +129,6 @@ struct Args {
     record_mode: Option<String>,
     fps: Option<u32>,
     stop: bool,
-    #[cfg(not(target_os = "macos"))]
     pause: Option<record::PauseCmd>,
     gif: bool,
     /// --audio[=SOURCES] or --no-audio ("none").
@@ -163,11 +161,8 @@ fn parse_args() -> Result<Args> {
             Long("no-audio") => a.audio = Some("none".into()),
             Long("separate-audio") => a.separate_audio = true,
             Long("stop") => a.stop = true,
-            #[cfg(not(target_os = "macos"))]
             Long("pause") => a.pause = Some(record::PauseCmd::Pause),
-            #[cfg(not(target_os = "macos"))]
             Long("resume") => a.pause = Some(record::PauseCmd::Resume),
-            #[cfg(not(target_os = "macos"))]
             Long("toggle-pause") => a.pause = Some(record::PauseCmd::Toggle),
             Short('h') | Long("help") => {
                 print!("{HELP}");
@@ -594,7 +589,6 @@ fn pick_recording_area(
 }
 
 /// Whether a recording starts out as a GIF: `--gif`, or `record_format`.
-#[cfg(not(target_os = "macos"))]
 fn wants_gif(cfg: &Config, args: &Args) -> bool {
     args.gif || cfg.record_format == "gif"
 }
@@ -602,8 +596,7 @@ fn wants_gif(cfg: &Config, args: &Args) -> bool {
 /// The overlay's GIF toggle is remembered: when it was flipped, it becomes
 /// `record_format`, so the tray, `clipt record` and the next Print Screen
 /// follow it.
-#[cfg(not(target_os = "macos"))]
-fn remember_gif(cfg: &Config, args: &Args, ed: &Editor) {
+fn remember_gif(cfg: &Config, args: &Args, ed: &editor::Editor) {
     if ed.gif != wants_gif(cfg, args)
         && let Err(e) = Config::set("record_format", if ed.gif { "gif" } else { "mp4" })
     {

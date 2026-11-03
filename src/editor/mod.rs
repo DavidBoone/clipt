@@ -244,6 +244,8 @@ pub struct Editor {
     pub sound: SoundToggles,
     /// Record mode: save a GIF rather than an MP4 (G, or its button).
     pub gif: bool,
+    /// Record mode offers the sound toggles (not on macOS yet).
+    pub can_sound: bool,
     /// The screenshot overlay may switch to record mode and back (Ctrl+R or
     /// the toolbar). `clipt record`'s picker can't: it only records.
     pub can_switch: bool,
@@ -299,6 +301,7 @@ impl Editor {
             record: false,
             sound: SoundToggles::default(),
             gif: false,
+            can_sound: !cfg!(target_os = "macos"),
             can_switch: false,
             last_click: None,
             width_hint: false,
@@ -971,11 +974,11 @@ impl Editor {
     /// Keys in record mode: selecting and adjusting, and the sound toggles.
     fn record_key(&mut self, key: Key, mods: Mods) -> bool {
         match key {
-            Key::Char('s' | 'S') if !mods.ctrl => {
+            Key::Char('s' | 'S') if !mods.ctrl && self.can_sound => {
                 self.sound.system = !self.sound.system;
                 return true;
             }
-            Key::Char('m' | 'M') if !mods.ctrl => {
+            Key::Char('m' | 'M') if !mods.ctrl && self.can_sound => {
                 self.sound.mic = !self.sound.mic;
                 return true;
             }
@@ -1361,6 +1364,7 @@ mod tests {
         assert!(!ed.key(Key::Char('r'), ctrl), "not without can_switch");
         assert!(!ed.record);
         ed.can_switch = true;
+        ed.can_sound = true;
         let buttons = |ed: &Editor| ui::toolbar_layout(ed).unwrap().1.into_iter().map(|b| b.1).collect::<Vec<_>>();
         assert!(buttons(&ed).contains(&ui::Button::RecordMode));
         assert!(ed.key(Key::Char('r'), ctrl));
@@ -1406,6 +1410,7 @@ mod tests {
     fn record_mode_selects_but_never_annotates() {
         let mut ed = editor(vec![shot("A", 0, 400, 300, 1, [0, 0, 0])], false);
         ed.record = true;
+        ed.can_sound = true;
         drag(&mut ed, (100.0, 100.0), (200.0, 200.0));
         for k in ['r', 'p', 't', '3'] {
             assert!(!ed.key(Key::Char(k), Mods::default()), "'{k}' is ignored");
@@ -1440,6 +1445,13 @@ mod tests {
         ed.key(Key::Escape, Mods::default());
         assert_eq!(ed.outcome, Some(Outcome::Cancel));
         assert!(ed.record, "record mode survives reused key handling");
+        // Where there's no sound to record (macOS, for now): no toggles.
+        ed.can_sound = false;
+        let (_, buttons) = ui::toolbar_layout(&ed).unwrap();
+        assert_eq!(buttons.iter().map(|b| b.1).collect::<Vec<_>>(), vec![ui::Button::Record, ui::Button::Close]);
+        let before = ed.sound;
+        ed.key(Key::Char('s'), Mods::default());
+        assert_eq!(ed.sound, before, "nor the S key");
     }
 
     #[test]

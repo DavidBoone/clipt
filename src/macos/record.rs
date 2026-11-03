@@ -1,0 +1,255 @@
+//! Recording on macOS: frames from ScreenCaptureKit (macOS 12.3+), handed
+//! to the same writer, ffmpeg pipe, pause and stop as on Linux.
+//!
+//! A display is captured with `sourceRect` cropping it to the area, so the
+//! window server does the cropping and scaling; a window is captured on its
+//! own (`desktopIndependentWindow`), even while something covers it. Frames
+//! arrive as BGRA pixel buffers on a dispatch queue of ours, are copied out
+//! and go to the writer's newest-frame slot; a still screen sends nothing.
+
+use crate::capture::{PixelOrder, VideoFrame};
+use crate::record::{Capture, Sink, Target};
+use anyhow::{Context, Result, anyhow, bail};
+use block2::RcBlock;
+use dispatch2::DispatchQueue;
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2::{AllocAnyThread, DefinedClass, MainThreadMarker, define_class, msg_send};
+use objc2_app_kit::NSApplication;
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_graphics::CGDisplayBounds;
+use objc2_core_media::{CMSampleBuffer, CMTime};
+use objc2_core_video::{
+    CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
+    CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress, kCVPixelFormatType_32BGRA,
+};
+use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
+use objc2_screen_capture_kit::{
+    SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate, SCStreamOutput, SCStreamOutputType,
+};
+use std::sync::Mutex;
+use std::sync::mpsc;
+use std::time::Duration;
+
+/// How long ScreenCaptureKit may take to list what's on screen, or to
+/// start and stop a stream. It answers in milliseconds; this is for a hang.
+const REPLY_LIMIT: Duration = Duration::from_secs(10);
+
+/// Objective-C objects made on the main thread and used on the capture
+/// thread. ScreenCaptureKit's objects are thread-safe; Rust can't know it.
+struct Sendable<T>(T);
+unsafe impl<T> Send for Sendable<T> {}
+
+impl<T> Sendable<T> {
+    /// A method, so a closure captures the whole wrapper, not its field.
+    fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+/// What the stream's callbacks tell the capture thread.
+enum Event {
+    /// The writer has what it needs (the sink said stop).
+    Done,
+    /// ScreenCaptureKit stopped the stream: the display went away, the
+    /// window closed, the permission was taken back.
+    Failed(String),
+}
+
+pub struct Ivars {
+    sink: Mutex<Option<Sink>>,
+    events: Mutex<mpsc::Sender<Event>>,
+}
+
+define_class!(
+    /// The stream's frame output and delegate.
+    #[unsafe(super(NSObject))]
+    #[name = "CliptRecordOutput"]
+    #[ivars = Ivars]
+    struct Output;
+
+    unsafe impl NSObjectProtocol for Output {}
+
+    unsafe impl SCStreamOutput for Output {
+        #[unsafe(method(stream:didOutputSampleBuffer:ofType:))]
+        fn did_output(&self, _stream: &SCStream, buffer: &CMSampleBuffer, kind: SCStreamOutputType) {
+            if kind != SCStreamOutputType::Screen {
+                return;
+            }
+            // Idle frames (nothing changed) carry no picture.
+            let Some(frame) = copy_frame(buffer) else { return };
+            let mut sink = self.ivars().sink.lock().unwrap();
+            let Some(s) = sink.as_mut() else { return };
+            if !s(frame) {
+                *sink = None;
+                let _ = self.ivars().events.lock().unwrap().send(Event::Done);
+            }
+        }
+    }
+
+    unsafe impl SCStreamDelegate for Output {
+        #[unsafe(method(stream:didStopWithError:))]
+        fn did_stop(&self, _stream: &SCStream, error: &NSError) {
+            let _ = self.ivars().events.lock().unwrap().send(Event::Failed(error.localizedDescription().to_string()));
+        }
+    }
+);
+
+impl Output {
+    fn new(sink: Sink, events: mpsc::Sender<Event>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(Ivars { sink: Mutex::new(Some(sink)), events: Mutex::new(events) });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// The picture in a sample buffer, as packed BGRx rows.
+fn copy_frame(buffer: &CMSampleBuffer) -> Option<VideoFrame> {
+    let px = unsafe { buffer.image_buffer() }?;
+    if unsafe { CVPixelBufferLockBaseAddress(&px, CVPixelBufferLockFlags::ReadOnly) } != 0 {
+        return None;
+    }
+    let (w, h, stride) = (CVPixelBufferGetWidth(&px), CVPixelBufferGetHeight(&px), CVPixelBufferGetBytesPerRow(&px));
+    let base = CVPixelBufferGetBaseAddress(&px) as *const u8;
+    let frame = (!base.is_null() && w > 0 && h > 0).then(|| {
+        let row = w * 4;
+        let mut data = Vec::with_capacity(row * h);
+        for y in 0..h {
+            data.extend_from_slice(unsafe { std::slice::from_raw_parts(base.add(y * stride), row) });
+        }
+        VideoFrame { width: w as u32, height: h as u32, order: PixelOrder::Bgrx, data }
+    });
+    unsafe { CVPixelBufferUnlockBaseAddress(&px, CVPixelBufferLockFlags::ReadOnly) };
+    frame
+}
+
+/// An NSError from a completion handler, as text; `None` for no error.
+fn error_text(e: *mut NSError) -> Option<String> {
+    unsafe { e.as_ref() }.map(|e| e.localizedDescription().to_string())
+}
+
+/// What's on screen now: displays and windows.
+fn shareable_content() -> Result<Retained<SCShareableContent>> {
+    let (tx, rx) = mpsc::channel();
+    let handler = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
+        let r = match unsafe { Retained::retain(content) } {
+            Some(c) => Ok(Sendable(c)),
+            None => Err(error_text(error).unwrap_or_else(|| "no reason given".into())),
+        };
+        let _ = tx.send(r);
+    });
+    unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&handler) };
+    match rx.recv_timeout(REPLY_LIMIT) {
+        Ok(Ok(c)) => Ok(c.into_inner()),
+        Ok(Err(e)) => bail!("ScreenCaptureKit can't list the screen's contents: {e}"),
+        Err(_) => bail!("ScreenCaptureKit didn't list the screen's contents within {} s", REPLY_LIMIT.as_secs()),
+    }
+}
+
+/// Frames for `target`, checked and set up here; the stream itself starts
+/// on the capture thread.
+pub(crate) fn capture(target: &Target, cursor: bool, interval: Duration) -> Result<Capture> {
+    let mtm = MainThreadMarker::new().context("not on the main thread")?;
+    // ScreenCaptureKit needs the window server connection AppKit makes.
+    let _ = NSApplication::sharedApplication(mtm);
+    super::capture::ensure_permission()?;
+    let outputs = super::capture::outputs(mtm)?;
+    anyhow::ensure!(!outputs.is_empty(), "no displays found");
+    let content = shareable_content()?;
+
+    let config = unsafe { SCStreamConfiguration::new() };
+    let (filter, size) = match target {
+        Target::Window(w) => {
+            let id: u32 = w.id.parse().with_context(|| format!("window id '{}'", w.id))?;
+            let windows = unsafe { content.windows() };
+            let win = windows.iter().find(|s| unsafe { s.windowID() } == id).context("that window has closed")?;
+            // Its size in pixels on the display it's on.
+            let (out, _) = crate::record::resolve_target(&outputs, target)?;
+            let frame = unsafe { win.frame() };
+            let scale = scale(&out);
+            let filter = unsafe { SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &win) };
+            unsafe { config.setIgnoreShadowsSingleWindow(true) };
+            (filter, (frame.size.width * scale, frame.size.height * scale))
+        }
+        t => {
+            let (out, crop) = crate::record::resolve_target(&outputs, t)?;
+            let displays = unsafe { content.displays() };
+            let display = displays
+                .iter()
+                .find(|d| {
+                    let b = CGDisplayBounds(unsafe { d.displayID() });
+                    (b.origin.x.round() as i32, b.origin.y.round() as i32) == (out.x, out.y)
+                })
+                .with_context(|| format!("ScreenCaptureKit doesn't list display {}", out.name))?;
+            let (x, y, w, h) = crop.unwrap_or((0.0, 0.0, out.width as f64, out.height as f64));
+            unsafe { config.setSourceRect(CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))) };
+            let scale = scale(&out);
+            let filter = unsafe { SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &display, &NSArray::new()) };
+            (filter, (w * scale, h * scale))
+        }
+    };
+    let (w, h) = (size.0.round().max(2.0) as usize, size.1.round().max(2.0) as usize);
+    unsafe {
+        config.setWidth(w);
+        config.setHeight(h);
+        config.setPixelFormat(kCVPixelFormatType_32BGRA);
+        config.setShowsCursor(cursor);
+        config.setMinimumFrameInterval(CMTime::new(interval.as_micros() as i64, 1_000_000));
+        // A few frames in hand, so a slow copy doesn't stall the stream.
+        config.setQueueDepth(5);
+    }
+    crate::record::debug(&format!("ScreenCaptureKit stream: {w}x{h} pixels"));
+
+    let parts = Sendable((filter, config));
+    let stream = Box::new(move |sink: Sink| -> Result<()> {
+        let (filter, config) = parts.into_inner();
+        run_stream(&filter, &config, sink)
+    });
+    Ok(Capture { zoom: false, start: Box::new(|| {}), stream })
+}
+
+/// Pixels per point on `out` (2 on Retina displays).
+fn scale(out: &crate::capture::Output) -> f64 {
+    if out.native.0 > 0 && out.width > 0 { out.native.0 as f64 / out.width as f64 } else { 1.0 }
+}
+
+/// Start the stream and keep it running until the writer stops or
+/// ScreenCaptureKit does.
+fn run_stream(filter: &SCContentFilter, config: &SCStreamConfiguration, sink: Sink) -> Result<()> {
+    let (tx, rx) = mpsc::channel();
+    let output = Output::new(sink, tx);
+    let delegate = ProtocolObject::from_ref(&*output);
+    let stream = unsafe { SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), filter, config, Some(delegate)) };
+    let queue = DispatchQueue::new("io.github.jasondyck.clipt.record", None);
+    unsafe {
+        stream.addStreamOutput_type_sampleHandlerQueue_error(ProtocolObject::from_ref(&*output), SCStreamOutputType::Screen, Some(&queue))
+    }
+    .map_err(|e| anyhow!("ScreenCaptureKit: {}", e.localizedDescription()))?;
+
+    if let Some(e) = call(|done| unsafe { stream.startCaptureWithCompletionHandler(Some(done)) })? {
+        bail!("ScreenCaptureKit didn't start recording: {e}");
+    }
+    let r = loop {
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(Event::Done) => break Ok(()),
+            Ok(Event::Failed(e)) => break Err(anyhow!("ScreenCaptureKit stopped: {e}")),
+            Err(mpsc::RecvTimeoutError::Timeout) if crate::record::stopping() => break Ok(()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(()),
+        }
+    };
+    if let Err(e) = call(|done| unsafe { stream.stopCaptureWithCompletionHandler(Some(done)) }) {
+        crate::record::debug(&format!("stopping the stream: {e:#}"));
+    }
+    r
+}
+
+/// Call a ScreenCaptureKit method that reports back through a completion
+/// handler taking an error, and wait for it: the error's text, if any.
+fn call(f: impl FnOnce(&block2::DynBlock<dyn Fn(*mut NSError)>)) -> Result<Option<String>> {
+    let (tx, rx) = mpsc::channel();
+    let done = RcBlock::new(move |e: *mut NSError| {
+        let _ = tx.send(error_text(e));
+    });
+    f(&done);
+    rx.recv_timeout(REPLY_LIMIT).map_err(|_| anyhow!("ScreenCaptureKit didn't answer within {} s", REPLY_LIMIT.as_secs()))
+}

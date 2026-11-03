@@ -58,12 +58,10 @@ impl Shot {
 }
 
 /// A rectangle in logical coordinates: x, y, width, height.
-#[cfg(not(target_os = "macos"))]
 pub type LogicalRect = (f64, f64, f64, f64);
 
 /// Byte order of a video frame's pixels.
 /// The fourth byte is padding (alpha, when present, is ignored).
-#[cfg(not(target_os = "macos"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PixelOrder {
     Bgrx,
@@ -72,7 +70,6 @@ pub enum PixelOrder {
 
 /// One frame of a recording: packed rows (stride = width * 4), in whatever
 /// byte order the compositor handed over, so the common case is a row copy.
-#[cfg(not(target_os = "macos"))]
 pub struct VideoFrame {
     pub width: u32,
     pub height: u32,

@@ -50,11 +50,22 @@ from the app only), and global shortcuts through `RegisterEventHotKey`,
 which needs no Accessibility permission: `hotkey` (a region, default
 `cmd+shift+2`) and `hotkey_full` (the whole desktop, off) in the config.
 Opening the app again while it runs captures a region. Each action starts a
-fresh `clipt`, as on Linux. The recording items come with phase 3.
+fresh `clipt`, as on Linux; one that fails says why in a notification.
 
-**3. Recording.** ScreenCaptureKit (`SCStream`, macOS 12.3+) for frames,
-ffmpeg's `h264_videotoolbox` encoder, the writer and camera as they are;
-`--stop` and `--pause` over the same pid file and FIFO as Linux.
+**3. Recording.** `src/macos/record.rs`: ScreenCaptureKit (`SCStream`,
+macOS 12.3+) for frames, handed to the same writer as Linux through
+`record::Capture` (the Linux sources are in `src/record/linux.rs`). A
+display is cropped by `sourceRect`, at the display's pixel scale; a window
+is captured on its own (`desktopIndependentWindow`), so it records while
+covered, at the size it had when recording started. ffmpeg's
+`h264_videotoolbox` encoder (its constant-quality mode needs Apple
+silicon; Intel Macs fall back to libx264), found on PATH or where Homebrew
+and MacPorts put it, since an app opened from Finder has only the system's
+PATH. `--stop` and `--pause` use the same pid file and FIFO as Linux, in
+`$TMPDIR`. The menu bar icon has Record Region, Record Screen, and while
+recording, Pause and Stop, and turns into a red record symbol. Not yet:
+a frame around the area being recorded (the main thread is busy writing,
+and AppKit draws only there), and sound, whose toggles the overlay hides.
 
 **4. Sound.** ScreenCaptureKit's system audio (macOS 13+) and the
 microphone, fed to the writer as PulseAudio is now.
@@ -113,6 +124,23 @@ CI can't show a screen to anyone, so phase 1 needs a person with a Mac:
 6. With two displays, especially a Retina one next to a non-Retina one:
    selections on each and across both.
 7. A full-screen app on its own Space: the overlay should cover it.
+
+Recording (phase 3), with ffmpeg installed (`brew install ffmpeg`):
+
+1. `./clipt record screen`, wait a few seconds, Ctrl-C: an MP4 in
+   `~/Videos/Screencasts` (`video_dir`), at full Retina resolution, smooth.
+   `CLIPT_DEBUG=1` prints the encoder and frames captured.
+2. `./clipt record`: the overlay, with no sound toggles. Drag an area,
+   Enter; stop with `./clipt record --stop` from another terminal. Only the
+   area is in the video.
+3. `./clipt record`, click a window, Enter, then cover it with another
+   window: the video shows the window, not what covered it.
+4. `--pause` and `--resume` mid-recording: the paused part is left out.
+5. `--gif`, `-g "100,100 640x480"`, `--cursor`.
+6. In clipt.app's menu: Record Region, then the icon turns red and the menu
+   has Pause and Stop; Stop saves and notifies.
+7. Without ffmpeg (or with it renamed): Record Screen from the menu shows a
+   notification saying to install it.
 
 Report what you see in the PR or an issue, with `CLIPT_DEBUG=1` output for
 anything odd.

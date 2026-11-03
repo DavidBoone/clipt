@@ -7,6 +7,9 @@
 //!   2. h264_nvenc (NVIDIA's driver has no VA-API encoding)
 //!   3. libx264 on the CPU
 //!
+//! and on macOS, h264_videotoolbox (Apple's encoder; its constant-quality
+//! mode needs Apple silicon) before libx264.
+//!
 //! Frames reach ffmpeg in a minimal Matroska stream (see `mkv.rs`) that
 //! carries each frame's capture time, and the output keeps those times
 //! (variable frame rate): frames only need sending when the screen changed,
@@ -64,6 +67,7 @@ pub enum Codec {
     /// VA-API through this render node.
     Vaapi(String),
     Nvenc,
+    VideoToolbox,
     X264,
 }
 
@@ -72,6 +76,7 @@ impl Codec {
         match self {
             Self::Vaapi(_) => "h264_vaapi",
             Self::Nvenc => "h264_nvenc",
+            Self::VideoToolbox => "h264_videotoolbox",
             Self::X264 => "libx264",
         }
     }
@@ -96,6 +101,7 @@ impl Codec {
             Self::Vaapi(_) => {
                 v(&["-vf", &format!("{pad},hwupload,scale_vaapi=format=nv12"), "-c:v", "h264_vaapi", "-qp", "24", "-bf", "0"])
             }
+            Self::VideoToolbox => v(&["-vf", &format!("{pad},format=nv12"), "-c:v", "h264_videotoolbox", "-q:v", "65", "-bf", "0"]),
             Self::Nvenc => v(&["-vf", pad, "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "24", "-b:v", "0", "-bf", "0"]),
             Self::X264 => {
                 // Above 1440p, veryfast needs several cores to keep up.
@@ -110,6 +116,7 @@ impl Codec {
 fn candidates(pref: &str) -> Result<Vec<Codec>> {
     let vaapi = || render_nodes().into_iter().map(Codec::Vaapi).collect::<Vec<_>>();
     Ok(match pref {
+        "auto" if cfg!(target_os = "macos") => vec![Codec::VideoToolbox, Codec::X264],
         "auto" => {
             let mut v = vaapi();
             v.extend([Codec::Nvenc, Codec::X264]);
@@ -117,8 +124,9 @@ fn candidates(pref: &str) -> Result<Vec<Codec>> {
         }
         "vaapi" => vaapi(),
         "nvenc" => vec![Codec::Nvenc],
+        "videotoolbox" => vec![Codec::VideoToolbox],
         "x264" => vec![Codec::X264],
-        other => bail!("unknown record_codec '{other}' (auto, vaapi, nvenc, x264)"),
+        other => bail!("unknown record_codec '{other}' (auto, vaapi, nvenc, videotoolbox, x264)"),
     })
 }
 
@@ -135,13 +143,32 @@ fn render_nodes() -> Vec<String> {
     v
 }
 
+/// `ffmpeg`: from PATH, or on macOS where Homebrew and MacPorts install it,
+/// since an app opened from Finder gets only the system's PATH.
+fn ffmpeg() -> Command {
+    #[cfg(target_os = "macos")]
+    {
+        let on_path = std::env::var_os("PATH").iter().flat_map(std::env::split_paths).any(|d| d.join("ffmpeg").is_file());
+        if !on_path
+            && let Some(p) =
+                ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/local/bin/ffmpeg"].iter().find(|p| Path::new(p).is_file())
+        {
+            return Command::new(p);
+        }
+    }
+    Command::new("ffmpeg")
+}
+
+#[cfg(target_os = "macos")]
+const INSTALL_FFMPEG: &str = "recording needs ffmpeg, which isn't installed (brew install ffmpeg)";
+#[cfg(not(target_os = "macos"))]
+const INSTALL_FFMPEG: &str = "recording needs ffmpeg, which isn't installed (install the 'ffmpeg' package)";
+
 /// The first codec that encodes a test frame, or an error naming what's missing.
 pub fn choose(pref: &str) -> Result<Codec> {
-    match Command::new("ffmpeg").arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status() {
+    match ffmpeg().arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status() {
         Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            bail!("recording needs ffmpeg, which isn't installed (install the 'ffmpeg' package)")
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(INSTALL_FFMPEG),
         Err(e) => return Err(e).context("running ffmpeg"),
     }
     let mut tried = Vec::new();
@@ -163,7 +190,7 @@ pub fn choose(pref: &str) -> Result<Codec> {
 /// Encode one small frame the way a recording would, to see if this codec works here.
 fn probe(c: &Codec) -> Result<()> {
     let (w, h) = (320, 240);
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = ffmpeg();
     cmd.args(["-hide_banner", "-loglevel", "error"]).args(c.global_args());
     cmd.args(["-f", "lavfi", "-i", &format!("color=c=gray:s={w}x{h}:d=0.1,format=bgr0"), "-frames:v", "1"]);
     cmd.args(c.output_args(w, h)).args(["-f", "null", "-"]);
@@ -181,7 +208,7 @@ pub fn check_aac() -> Result<()> {
     // Silence as 16-bit samples, as recordings send them: a minimal ffmpeg
     // (the Flatpak's) has that decoder, not the 8-bit one anullsrc gives.
     let silence = "anullsrc=r=48000:cl=stereo,aformat=sample_fmts=s16";
-    let out = Command::new("ffmpeg")
+    let out = ffmpeg()
         .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", silence, "-f", "lavfi", "-i", silence])
         .args([
             "-t",
@@ -456,7 +483,7 @@ impl Encoder {
     /// Start ffmpeg on a `w` x `h` video, with `sound` fed through
     /// `write_audio`.
     pub fn spawn(codec: &Codec, w: u32, h: u32, order: PixelOrder, fps: u32, sound: Option<&Sound>, path: &Path) -> Result<Self> {
-        let mut cmd = Command::new("ffmpeg");
+        let mut cmd = ffmpeg();
         cmd.args(["-hide_banner", "-loglevel", "error", "-y"]).args(codec.global_args());
         cmd.args(["-f", "matroska", "-i", "pipe:0"]);
         cmd.args(codec.output_args(w, h));
@@ -566,7 +593,7 @@ pub fn remix(sound: &Sound, video: &Path, down: f32, duration: Duration) -> Resu
     let out = video.with_file_name(format!(".{name}.clipt-remix.{}", video.extension().and_then(|e| e.to_str()).unwrap_or("mp4")));
     let mov = matches!(video.extension().and_then(|e| e.to_str()), Some("mp4" | "mov"));
     let quieter = sound.quieter(down);
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = ffmpeg();
     cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-i"]).arg(video).arg("-i").arg(&kept);
     cmd.args(quieter.graph_args(1, mov, false)).args(["-c:v", "copy"]);
     if mov {
@@ -643,7 +670,7 @@ fn measure(mut out: std::process::ChildStdout, channels: usize) -> std::thread::
 pub fn to_gif(mp4: &Path, gif: &Path, fps: u32, duration: Duration) -> Result<()> {
     let filter =
         format!("fps={fps},split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle");
-    let mut child = Command::new("ffmpeg")
+    let mut child = ffmpeg()
         .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
         .arg(mp4)
         .args(["-vf", &filter, "-loop", "0"])

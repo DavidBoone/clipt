@@ -202,8 +202,11 @@ impl Lock {
         lock.set(false)?;
         let ctl = ctlfile();
         let _ = std::fs::remove_file(&ctl); // stale
-        rustix::fs::mkfifoat(rustix::fs::CWD, &ctl, rustix::fs::Mode::from_raw_mode(0o600))
-            .with_context(|| format!("creating {}", ctl.display()))?;
+        // libc's mkfifo: rustix has no FIFOs on macOS.
+        let path = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(ctl.as_os_str()))?;
+        if unsafe { libc::mkfifo(path.as_ptr(), 0o600) } != 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| format!("creating {}", ctl.display()));
+        }
         // Read and write: with a writer of its own, reads wait for the next
         // command instead of seeing end-of-file whenever a sender closes.
         let mut fifo =
@@ -436,7 +439,11 @@ pub fn run(cfg: &Config, opts: Options) -> Result<()> {
         Ok(stats) => {
             println!("{}", target.display());
             if cfg.notify {
-                crate::notify::send("Recording saved", &format!("{}  ·  {}", target.display(), stats), None);
+                let body = format!("{}  ·  {}", target.display(), stats);
+                #[cfg(not(target_os = "macos"))]
+                crate::notify::send("Recording saved", &body, None);
+                #[cfg(target_os = "macos")]
+                crate::macos::notify("Recording saved", &body);
             }
         }
         Err(_) if path.exists() => eprintln!("clipt: the partial recording is in {}", path.display()),
@@ -446,7 +453,7 @@ pub fn run(cfg: &Config, opts: Options) -> Result<()> {
 }
 
 /// The output to capture and the crop within it (output-logical coordinates).
-fn resolve_target(outputs: &[Output], target: &Target) -> Result<(Output, Option<LogicalRect>)> {
+pub(crate) fn resolve_target(outputs: &[Output], target: &Target) -> Result<(Output, Option<LogicalRect>)> {
     match target {
         Target::Screen(None) => Ok((outputs[0].clone(), None)),
         Target::Screen(Some(n)) => {
@@ -801,7 +808,7 @@ fn audio_ms(at: Instant, t0: Instant, pauses: &Pauses) -> u64 {
     at.saturating_duration_since(t0).saturating_sub(pauses.before(at)).as_millis() as u64
 }
 
-fn debug(msg: &str) {
+pub(crate) fn debug(msg: &str) {
     if std::env::var_os("CLIPT_DEBUG").is_some() {
         eprintln!("clipt: {msg}");
     }
