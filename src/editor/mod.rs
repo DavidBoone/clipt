@@ -381,7 +381,12 @@ impl Editor {
         if !matches!(self.drag, Drag::None | Drag::Pending { .. }) {
             return None;
         }
-        let p = self.pointer;
+        self.target_at(self.pointer)
+    }
+
+    /// What a click at `p` picks: the topmost window there (unless Tab
+    /// switched to whole screens), or else its screen.
+    fn target_at(&self, p: Pt) -> Option<Hover> {
         let scr = self.screens.iter().find(|s| s.bounds().contains(p.0, p.1))?;
         if !self.hover_screen {
             let desk = self.desktop();
@@ -814,9 +819,10 @@ impl Editor {
         match std::mem::replace(&mut self.drag, Drag::None) {
             Drag::Pending { .. } => {
                 // A click without a drag picks what's highlighted: the window
-                // under the pointer, or its whole screen.
+                // under the pointer, or its whole screen. Also with something
+                // already selected, when nothing is highlighted.
                 self.pointer = p;
-                if let Some(h) = self.hover() {
+                if let Some(h) = self.target_at(p) {
                     self.sel = Some(h.rect);
                 } else if let Some(i) = self.screen_at(p) {
                     self.sel = Some(self.screens[i].bounds());
@@ -1377,7 +1383,7 @@ mod tests {
         };
         let mut ed = editor(vec![shot("A", 0, 400, 300, 1, [0, 0, 0])], false);
         // Topmost first; the second window partly hangs off the screen.
-        ed.windows = vec![win(100.0, 100.0, 50.0, 50.0), win(50.0, 50.0, 400.0, 100.0)];
+        ed.windows = vec![win(100.0, 100.0, 50.0, 50.0), win(50.0, 50.0, 400.0, 100.0), win(200.0, 200.0, 50.0, 50.0)];
         let click = |ed: &mut Editor, p: Pt| {
             ed.pointer_motion(p, Mods::default());
             ed.button_press(p, true, Mods::default());
@@ -1391,6 +1397,11 @@ mod tests {
         click(&mut ed, (60.0, 60.0));
         let r = ed.sel.unwrap();
         assert_eq!((r.left(), r.top(), r.right(), r.bottom()), (50.0, 50.0, 400.0, 150.0), "clipped to the desktop");
+
+        // With one window selected, clicking another picks it, not the screen.
+        click(&mut ed, (220.0, 220.0));
+        let r = ed.sel.unwrap();
+        assert_eq!((r.left(), r.top(), r.width(), r.height()), (200.0, 200.0, 50.0, 50.0), "the other window");
 
         ed.sel = None;
         ed.key(Key::Tab, Mods::default());

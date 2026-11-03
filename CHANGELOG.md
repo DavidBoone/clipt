@@ -32,6 +32,8 @@ All notable changes are listed here. The format follows
 - The Copy button's tooltip shows Ctrl+C rather than Enter (both still copy).
 
 ### Fixed
+- With something selected, clicking a window outside it selected that
+  window's whole screen instead of the window.
 - `--gif` was ignored for a recording started from the screenshot overlay's
   Video mode.
 - Turning the sound or microphone on or off with S or M didn't redraw their
