@@ -23,6 +23,7 @@ USAGE:
     clipt screen [NAME]   Capture one display (default: the main one)
     clipt list            Show the displays
     clipt tray            Menu bar icon, with the shortcuts (what opening clipt.app does)
+    clipt config [KEY [VALUE]]  Show the settings, one setting, or set it
 
 OPTIONS:
     -o, --output PATH     Write the PNG to PATH ('-' for stdout) instead of the save dir

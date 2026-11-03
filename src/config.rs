@@ -1,9 +1,9 @@
 //! ~/.config/clipt/config.toml — every key optional.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Where Ctrl+S / `full` / `screen` save. `~` is expanded.
@@ -113,19 +113,49 @@ impl Config {
 
     /// Write `palette` into the config file, leaving the rest of it alone.
     pub fn save_palette(palette: &[(u8, u8, u8); 8]) -> anyhow::Result<()> {
+        let v = palette.iter().map(|&c| format!("\"{}\"", hex(c))).collect::<Vec<_>>().join(", ");
+        Self::set_raw("palette", &format!("[{v}]"))
+    }
+
+    /// Set `key` to `value` in the config file, keeping its comments and
+    /// other keys. `value` is a TOML value (`true`, `30`, `"gif"`, `[...]`);
+    /// anything that isn't one counts as a string, so `gif` works unquoted.
+    /// Refused, leaving the file alone, if the result isn't a valid config.
+    pub fn set(key: &str, value: &str) -> anyhow::Result<()> {
+        let literal = format!("v = {value}");
+        let value = if toml::from_str::<toml::Table>(&literal).is_ok() { value.to_string() } else { toml_string(value) };
+        Self::set_raw(key, &value)
+    }
+
+    fn set_raw(key: &str, value: &str) -> anyhow::Result<()> {
         let p = Self::path();
         let old = match std::fs::read_to_string(&p) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(e.into()),
         };
+        let new = with_key(&old, key, value);
+        let cfg = toml::from_str::<Config>(&new).map_err(|e| anyhow::anyhow!("{key} = {value}: {}", e.message()))?;
+        anyhow::ensure!(matches!(cfg.record_format.as_str(), "mp4" | "gif"), "record_format is mp4 or gif");
         if let Some(dir) = p.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let tmp = p.with_extension("toml.new");
-        std::fs::write(&tmp, with_palette(&old, palette))?;
+        std::fs::write(&tmp, new)?;
         std::fs::rename(&tmp, &p)?;
         Ok(())
+    }
+
+    /// Every setting and its value, as `key = value` lines (TOML).
+    pub fn listing(&self) -> String {
+        let serde_json::Value::Object(map) = serde_json::to_value(self).unwrap_or_default() else { return String::new() };
+        map.iter().filter(|(_, v)| !v.is_null()).map(|(k, v)| format!("{k} = {v}\n")).collect()
+    }
+
+    /// One setting's value, as TOML.
+    pub fn get(&self, key: &str) -> Option<String> {
+        let serde_json::Value::Object(map) = serde_json::to_value(self).ok()? else { return None };
+        map.get(key).filter(|v| !v.is_null()).map(|v| v.to_string())
     }
 
     /// A fresh, non-clobbering path in `save_dir`.
@@ -152,20 +182,27 @@ fn parse_hex(s: &str) -> Option<(u8, u8, u8)> {
     Some((n(0)?, n(2)?, n(4)?))
 }
 
-/// `src` (a config file's text) with its `palette = [...]` replaced, or one
-/// added at the end. Only that line, or those lines for an array split
-/// over several, change; comments and the other keys stay as they are.
-fn with_palette(src: &str, palette: &[(u8, u8, u8); 8]) -> String {
-    let line = format!("palette = [{}]", palette.iter().map(|&c| format!("\"{}\"", hex(c))).collect::<Vec<_>>().join(", "));
+/// A TOML string holding `s`.
+fn toml_string(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_default()
+}
+
+/// `src` (a config file's text) with `key = value` in place of the key's
+/// line, or added before the first table, or at the end. Only that line,
+/// or those lines for an array split over several, change; comments and
+/// the other keys stay as they are.
+fn with_key(src: &str, key: &str, value: &str) -> String {
+    let line = format!("{key} = {value}");
     let mut out = Vec::new();
     let mut lines = src.lines();
     let mut done = false;
     while let Some(l) = lines.next() {
-        let key = l.trim_start();
-        if !done && key.strip_prefix("palette").is_some_and(|r| r.trim_start().starts_with('=')) {
+        let trimmed = l.trim_start();
+        if !done && trimmed.strip_prefix(key).is_some_and(|r| r.trim_start().starts_with('=')) {
             // Skip the rest of an array written over several lines.
+            let open = l.split_once('=').map_or("", |(_, v)| v.trim_start());
             let mut cur = l;
-            while !cur.contains(']') {
+            while open.starts_with('[') && !cur.contains(']') {
                 match lines.next() {
                     Some(n) => cur = n,
                     None => break,
@@ -173,7 +210,7 @@ fn with_palette(src: &str, palette: &[(u8, u8, u8); 8]) -> String {
             }
             out.push(line.clone());
             done = true;
-        } else if !done && key.starts_with('[') {
+        } else if !done && trimmed.starts_with('[') {
             // A table starts: top-level keys must come before it.
             out.push(line.clone());
             out.push(l.to_string());
@@ -227,20 +264,39 @@ fn strftime(fmt: &str) -> String {
 mod tests {
     use super::*;
 
+    fn palette_value(p: &[(u8, u8, u8); 8]) -> String {
+        format!("[{}]", p.iter().map(|&c| format!("\"{}\"", hex(c))).collect::<Vec<_>>().join(", "))
+    }
+
+    #[test]
+    fn settings_are_set_in_place() {
+        let src = "# clipt\nfilename = \"shot\"\nrecord_format = \"mp4\" # the default\nnotify = true\n\n[x]\n";
+        let out = with_key(src, "record_format", &toml_string("gif"));
+        assert_eq!(out, "# clipt\nfilename = \"shot\"\nrecord_format = \"gif\"\nnotify = true\n\n[x]\n");
+        let out = with_key(src, "copy_on_save", "false");
+        assert!(out.contains("notify = true\n\ncopy_on_save = false\n[x]"), "before the first table: {out}");
+        let cfg = Config::default();
+        assert_eq!(cfg.get("record_format").as_deref(), Some("\"mp4\""));
+        assert_eq!(cfg.get("nope"), None);
+        assert!(cfg.listing().lines().any(|l| l == "notify = true"), "{}", cfg.listing());
+        let cfg: Config = toml::from_str(&cfg.listing()).expect("the listing reads back as a config");
+        assert_eq!(cfg.record_format, "mp4");
+    }
+
     #[test]
     fn palette_round_trips_through_the_file() {
         let pal = crate::editor::PALETTE;
         let mut new = pal;
         new[0] = (1, 2, 3);
         let src = "# mine\ncolor = 2\npalette = [\n  \"#ff0000\",\n]\nwidth = 5\n";
-        let out = with_palette(src, &new);
+        let out = with_key(src, "palette", &palette_value(&new));
         assert!(out.starts_with("# mine\ncolor = 2\npalette = [\"#010203\", "), "{out}");
         assert!(out.ends_with("]\nwidth = 5\n"), "the other keys stay: {out}");
         let cfg: Config = toml::from_str(&out).unwrap();
         assert_eq!(cfg.palette_rgb(), new);
         assert_eq!(cfg.color, 2);
 
-        let out = with_palette("width = 5\n", &pal);
+        let out = with_key("width = 5\n", "palette", &palette_value(&pal));
         let cfg: Config = toml::from_str(&out).unwrap();
         assert_eq!((cfg.palette_rgb(), cfg.width), (pal, 5.0), "added when missing: {out}");
 

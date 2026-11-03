@@ -60,6 +60,7 @@ clipt full -g "$(slurp)" -o -   # slurp region to stdout
 clipt list          # outputs and available backends
 clipt tray          # tray icon: click = region, right-click = menu
 clipt update        # update to the latest release (--check: just check)
+clipt config        # list the settings; clipt config KEY VALUE sets one
 clipt record        # pick an area to record, Enter starts
 clipt record --stop # ...and stop it (or Ctrl-C, or click the tray icon)
 clipt record --audio # with the sound the computer is playing
@@ -125,13 +126,15 @@ backs out a step.
 
 To record a video instead, click **Video** at the bottom of the screen (or
 press **Ctrl+R**), select, toggle sound with **S** and the microphone with
-**M**, and press **Enter**; stop it from the tray or with `clipt record --stop`.
+**M**, choose a GIF with **G** (remembered for next time), and press
+**Enter**; stop it from the tray or with `clipt record --stop`.
 
 `clipt tray` puts an icon in the system tray (StatusNotifierItem: KDE, waybar,
 GNOME with the AppIndicator extension, Xfce, …). Left-click captures a region,
 middle-click copies the whole desktop, and the right-click menu adds a 3-second
-delay, the screenshots folder and Quit. Each capture runs as a fresh `clipt`
-process, so the tray itself stays idle.
+delay, recording, the folders, ticks for *Record as GIF*, *Copy when saving*
+and *Notifications*, *Settings…* (opens the config file) and Quit. Each
+capture runs as a fresh `clipt` process, so the tray itself stays idle.
 
 **Updates:** `clipt update` (or *Check for updates…* in the tray menu)
 asks GitHub for the latest release. When clipt was installed with
@@ -145,7 +148,9 @@ something else is copied (Wayland clipboards are owned by a live client).
 
 ## Config
 
-`~/.config/clipt/config.toml`, every key optional:
+`~/.config/clipt/config.toml`, every key optional. `clipt config` lists
+them with their values, and `clipt config record_format gif` sets one
+without touching the rest of the file:
 
 ```toml
 save_dir = "~/Pictures/Screenshots"

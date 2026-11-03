@@ -15,7 +15,7 @@ use objc2::runtime::{AnyClass, ProtocolObject};
 use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSControlStateValueOff, NSControlStateValueOn,
-    NSEventModifierFlags, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSVariableStatusItemLength,
+    NSEventModifierFlags, NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar, NSVariableStatusItemLength,
 };
 use objc2_foundation::{NSBundle, NSData, NSObject, NSObjectProtocol, NSSize, NSString};
 use std::ffi::c_void;
@@ -31,6 +31,10 @@ enum Action {
     RegionDelayed,
     Full,
     OpenFolder,
+    /// Settings the menu ticks, kept in the config.
+    ToggleCopy,
+    ToggleNotify,
+    OpenSettings,
     Login,
     Quit,
 }
@@ -42,6 +46,10 @@ const MENU: &[Option<(&str, Action)>] = &[
     Some(("Copy Full Desktop", Action::Full)),
     None,
     Some(("Open Screenshots Folder", Action::OpenFolder)),
+    None,
+    Some(("Copy When Saving", Action::ToggleCopy)),
+    Some(("Notifications", Action::ToggleNotify)),
+    Some(("Settings…", Action::OpenSettings)),
     None,
     Some(("Open at Login", Action::Login)),
     Some(("Quit clipt", Action::Quit)),
@@ -64,8 +72,17 @@ fn run_action(a: Action) {
             let _ = std::fs::create_dir_all(dir);
             Command::new("/usr/bin/open").arg(dir).spawn()
         }
+        Action::OpenSettings => {
+            let p = Config::path();
+            if !p.exists() {
+                let _ = p.parent().map(std::fs::create_dir_all);
+                let _ = std::fs::write(&p, "# clipt's settings: `clipt config` lists them, `man clipt` explains them.\n");
+            }
+            // -t: the default text editor, whatever owns .toml files.
+            Command::new("/usr/bin/open").arg("-t").arg(&p).spawn()
+        }
         // Handled by the menu, which has the item to tick.
-        Action::Login | Action::Quit => return,
+        Action::Login | Action::Quit | Action::ToggleCopy | Action::ToggleNotify => return,
     };
     // Reap it in the background, so it doesn't linger as a zombie.
     match r {
@@ -82,6 +99,22 @@ define_class!(
 
     unsafe impl NSObjectProtocol for Tray {}
 
+    unsafe impl NSMenuDelegate for Tray {
+        /// The ticks follow the config, which `clipt config` or an editor
+        /// may have changed since.
+        #[unsafe(method(menuWillOpen:))]
+        fn menu_will_open(&self, menu: &NSMenu) {
+            let cfg = Config::load().unwrap_or_default();
+            for item in menu.itemArray().iter() {
+                if let Some(Some((_, a))) = MENU.get(item.tag() as usize)
+                    && let Some(on) = setting_on(*a, &cfg)
+                {
+                    item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
+                }
+            }
+        }
+    }
+
     unsafe impl NSApplicationDelegate for Tray {
         /// Opening clipt.app again while the tray runs captures a region.
         #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
@@ -97,6 +130,7 @@ define_class!(
             let Some(Some((_, a))) = MENU.get(item.tag() as usize) else { return };
             match a {
                 Action::Login => toggle_login(item),
+                Action::ToggleCopy | Action::ToggleNotify => toggle_setting(*a, item),
                 Action::Quit => NSApplication::sharedApplication(self.mtm()).terminate(None),
                 a => run_action(*a),
             }
@@ -177,6 +211,7 @@ pub fn run(cfg: &Config) -> Result<()> {
         button.setImage(Some(&*menu_bar_icon()?));
         button.setToolTip(Some(&NSString::from_str("clipt")));
     }
+    menu.setDelegate(Some(ProtocolObject::from_ref(&*tray)));
     item.setMenu(Some(&menu));
 
     app.run();
@@ -190,6 +225,26 @@ fn menu_bar_icon() -> Result<Retained<NSImage>> {
     let img = NSImage::initWithData(NSImage::alloc(), &data).context("the menu bar icon didn't decode")?;
     img.setSize(NSSize::new(18.0, 18.0));
     Ok(img)
+}
+
+/// Whether a ticked setting is on: `None` for items that aren't one.
+fn setting_on(a: Action, cfg: &Config) -> Option<bool> {
+    match a {
+        Action::ToggleCopy => Some(cfg.copy_on_save),
+        Action::ToggleNotify => Some(cfg.notify),
+        _ => None,
+    }
+}
+
+/// Flip a ticked setting in the config file, and the tick with it.
+fn toggle_setting(a: Action, item: &NSMenuItem) {
+    let cfg = Config::load().unwrap_or_default();
+    let on = !setting_on(a, &cfg).unwrap_or(false);
+    let key = if a == Action::ToggleCopy { "copy_on_save" } else { "notify" };
+    if let Err(e) = Config::set(key, if on { "true" } else { "false" }) {
+        return eprintln!("clipt: {e:#}");
+    }
+    item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
 }
 
 /// Whether this is clipt.app, which can open at login, and macOS 13 or
