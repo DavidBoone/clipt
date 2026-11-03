@@ -2,6 +2,7 @@
 //! about Wayland; the overlay feeds it input in logical desktop coordinates and
 //! asks it to paint each output.
 
+pub mod damage;
 pub mod shapes;
 pub mod ui;
 
