@@ -135,6 +135,8 @@ jobs:
           cargo build --release --locked --target x86_64-apple-darwin
           mkdir -p dist
           lipo -create -output dist/clipt target/aarch64-apple-darwin/release/clipt target/x86_64-apple-darwin/release/clipt
+          codesign --force --sign - dist/clipt
+          packaging/macos/build-app.sh dist/clipt dist
       - name: sign and notarise
         env:
           MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
@@ -144,7 +146,7 @@ jobs:
           MACOS_NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
         run: |
           if [ -z "$MACOS_CERT_P12" ]; then echo "::error::no macOS signing secrets"; exit 1; fi
-          .github/scripts/macos-sign.sh dist/clipt 30m
+          .github/scripts/macos-sign.sh --wait 30m dist/clipt dist/clipt.app
       - run: dist/clipt --version
       - name: pack
         env:
@@ -156,10 +158,15 @@ jobs:
           cp data/completions/clipt.bash data/completions/_clipt data/completions/clipt.fish "$name/"
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          app="clipt-${TAG}-macos-app.zip"
+          ditto -c -k --keepParent dist/clipt.app "$app"
+          shasum -a 256 "$app" > "$app.sha256"
       - uses: actions/upload-artifact@v7
         with:
           name: macos
-          path: clipt-*.tar.gz*
+          path: |
+            clipt-*.tar.gz*
+            clipt-*-macos-app.zip*
 
   release:
     needs: [prepare, build, macos]
@@ -178,7 +185,7 @@ jobs:
         run: |
           v=${TAG#v}
           awk -v v="$v" '/^## \[/{p = index($0, "[" v "]") > 0; next} p' CHANGELOG.md > notes.md
-          sha256sum clipt-*.tar.gz clipt*.deb clipt*.rpm > SHA256SUMS
+          sha256sum clipt-*.tar.gz clipt-*-macos-app.zip clipt*.deb clipt*.rpm > SHA256SUMS
           case "$TAG" in *-*) echo "PRERELEASE=true" >> "$GITHUB_ENV" ;; *) echo "PRERELEASE=false" >> "$GITHUB_ENV" ;; esac
       - uses: softprops/action-gh-release@v2
         with:
@@ -188,6 +195,7 @@ jobs:
           prerelease: ${{ env.PRERELEASE }}
           files: |
             clipt-*.tar.gz*
+            clipt-*-macos-app.zip*
             clipt*.deb
             clipt*.rpm
             SHA256SUMS
