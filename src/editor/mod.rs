@@ -830,23 +830,25 @@ impl Editor {
         let w = (rect.width() * scale).round().max(1.0) as u32;
         let h = (rect.height() * scale).round().max(1.0) as u32;
         let mut pm = Pixmap::new(w, h)?;
-        for s in &self.screens {
-            let b = s.bounds();
-            if b.intersect(&rect).is_none() {
-                continue;
+        // The screens under the selection, for the output pixels from `at` on.
+        let fill = |pm: &mut tiny_skia::PixmapMut, at: (i32, i32)| {
+            for s in &self.screens {
+                let b = s.bounds();
+                if b.intersect(&rect).is_none() {
+                    continue;
+                }
+                let k = scale / s.scale;
+                let quality = if (k - 1.0).abs() < 1e-3 { FilterQuality::Nearest } else { FilterQuality::Bicubic };
+                let paint = PixmapPaint { quality, ..Default::default() };
+                let tx = ((b.left() - rect.left()) * scale).round() - at.0 as f32;
+                let ty = ((b.top() - rect.top()) * scale).round() - at.1 as f32;
+                pm.draw_pixmap(0, 0, s.bg.as_ref(), &paint, Transform::from_row(k, 0.0, 0.0, k, tx, ty), None);
             }
-            let k = scale / s.scale;
-            let quality = if (k - 1.0).abs() < 1e-3 { FilterQuality::Nearest } else { FilterQuality::Bicubic };
-            let paint = PixmapPaint { quality, ..Default::default() };
-            let tx = (b.left() - rect.left()) * scale;
-            let ty = (b.top() - rect.top()) * scale;
-            pm.draw_pixmap(0, 0, s.bg.as_ref(), &paint, Transform::from_row(k, 0.0, 0.0, k, tx.round(), ty.round()), None);
-        }
-        let clean = pm.clone();
+        };
+        fill(&mut pm.as_mut(), (0, 0));
         let view = View { ox: rect.left(), oy: rect.top(), scale, swap_rb: self.swap_rb, off: (0.0, 0.0) };
-        for shape in &self.shapes {
-            shape.draw(&mut pm.as_mut(), &view, Some((clean.as_ref(), (0, 0))), &self.fonts);
-        }
+        let shapes: Vec<&Shape> = self.shapes.iter().collect();
+        shapes::draw_all(&mut pm.as_mut(), &view, (w as i32, h as i32), &shapes, &self.fonts, &fill);
         let mut data = pm.take();
         if self.swap_rb {
             for p in data.as_chunks_mut::<4>().0 {
@@ -1098,6 +1100,28 @@ mod tests {
         }
     }
 
+    /// Pixelating over a shape blurs the shape too, rather than replacing it
+    /// with the blurred screenshot.
+    #[test]
+    fn pixelate_covers_shapes_under_it() {
+        let mut ed = editor(vec![shot("A", 0, 300, 200, 1, [200, 10, 10])], false);
+        drag(&mut ed, (0.0, 0.0), (300.0, 200.0));
+        ed.tool = Tool::Line;
+        ed.color = 4; // blue
+        ed.width = 20.0;
+        drag(&mut ed, (0.0, 100.0), (300.0, 100.0));
+        ed.tool = Tool::Pixelate;
+        drag(&mut ed, (50.0, 50.0), (250.0, 150.0));
+        let img = ed.export().unwrap();
+        let at = |x: usize, y: usize| &img.data[(y * 300 + x) * 4..][..3];
+        assert!(at(150, 100)[2] > 100, "the line shows through, blurred: {:?}", at(150, 100));
+        assert_eq!(at(150, 60), &[200, 10, 10], "away from the line, the screenshot");
+        // Blocks are uniform: the line's edge is blurred, not crisp.
+        let row: Vec<_> = (50..150).map(|y| at(150, y).to_vec()).collect();
+        let distinct = row.windows(2).filter(|w| w[0] != w[1]).count();
+        assert!(distinct < 20, "{distinct} changes down a pixelated column");
+    }
+
     #[test]
     fn export_spans_two_outputs() {
         let mut ed = editor(vec![shot("L", 0, 100, 100, 1, [255, 0, 0]), shot("R", 100, 100, 100, 1, [0, 255, 0])], false);
@@ -1313,6 +1337,16 @@ mod tests {
         });
         step(&mut ed, &|e| {
             e.button_release((260.0, 230.0), true);
+        });
+        // A small repaint inside the pixelation cuts through its blocks.
+        step(&mut ed, &|e| {
+            e.pointer_motion((200.0, 160.0), m);
+        });
+        step(&mut ed, &|e| {
+            e.scroll(1.0);
+        });
+        step(&mut ed, &|e| {
+            e.pointer_motion((205.0, 165.0), m);
         });
         step(&mut ed, &|e| {
             e.tool = Tool::Text;

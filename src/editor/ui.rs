@@ -298,46 +298,19 @@ pub fn render(ed: &Editor, idx: usize, pm: &mut PixmapMut, origin: (i32, i32)) {
     let s = sv.scale;
     let view = View { off: (origin.0 as f32, origin.1 as f32), ..sv };
     let bounds = scr.bounds();
-
-    // Background: dimmed everywhere, clean inside the selection.
-    {
-        let (pw, ph) = (pm.width() as usize, pm.height() as usize);
-        let (bw, bh) = (scr.bg.width() as usize, scr.bg.height() as usize);
-        let (ox, oy) = (origin.0.max(0) as usize, origin.1.max(0) as usize);
-        let cols = pw.min(bw.saturating_sub(ox));
-        let sel_px = ed.lit().and_then(|r| r.intersect(&bounds)).map(|sel| {
-            let (x0, y0) = sv.px((sel.left(), sel.top()));
-            let (x1, y1) = sv.px((sel.right(), sel.bottom()));
-            (x0.round().max(0.0) as usize, y0.round().max(0.0) as usize, x1.round().max(0.0) as usize, y1.round().max(0.0) as usize)
-        });
-        let src = scr.bg.data();
-        let dst = pm.data_mut();
-        for y in 0..ph.min(bh.saturating_sub(oy)) {
-            let sy = oy + y;
-            let srow = &src[(sy * bw + ox) * 4..(sy * bw + ox + cols) * 4];
-            let drow = &mut dst[y * pw * 4..(y * pw + cols) * 4];
-            match sel_px {
-                Some((x0, y0, x1, y1)) if sy >= y0 && sy < y1 => {
-                    // [dim | clean | dim], in this pixmap's columns
-                    let a = x0.saturating_sub(ox).min(cols);
-                    let b = x1.saturating_sub(ox).min(cols);
-                    dim_copy(&mut drow[..a * 4], &srow[..a * 4]);
-                    drow[a * 4..b * 4].copy_from_slice(&srow[a * 4..b * 4]);
-                    dim_copy(&mut drow[b * 4..], &srow[b * 4..]);
-                }
-                _ => dim_copy(drow, srow),
-            }
-        }
-    }
+    background(ed, idx, pm, origin);
 
     // Record mode records the live screen, so annotations aren't shown.
-    for shape in ed.shapes.iter().chain(ed.in_progress()).filter(|_| !ed.record) {
-        shape.draw(pm, &view, Some((scr.bg.as_ref(), origin)), &ed.fonts);
+    if !ed.record {
+        let shapes: Vec<&Shape> = ed.shapes.iter().chain(ed.in_progress()).collect();
+        let size = (scr.bg.width() as i32, scr.bg.height() as i32);
+        let fill = |pm: &mut PixmapMut, at: (i32, i32)| background(ed, idx, pm, at);
+        super::shapes::draw_all(pm, &view, size, &shapes, &ed.fonts, &fill);
     }
     if let Some(te) = &ed.text {
         let size = ed.text_size();
         let shape = Shape::Text { pos: te.pos, text: te.text.clone(), color: ed.current_color(), size };
-        shape.draw(pm, &view, None, &ed.fonts);
+        shape.draw(pm, &view, &ed.fonts);
         // caret after the last line
         let last = te.text.rsplit('\n').next().unwrap_or("");
         let lines = te.text.matches('\n').count() as f32;
@@ -376,6 +349,41 @@ pub fn render(ed: &Editor, idx: usize, pm: &mut PixmapMut, origin: (i32, i32)) {
         let r = Rect::from_xywh(ed.pointer.0 + 16.0, ed.pointer.1 + 16.0, w, 26.0).unwrap();
         pill(pm, &view, r, 13.0);
         label(ed, pm, &view, (r.left() + 10.0, r.top() + 5.0), 13.0, &t, ICON(), false);
+    }
+}
+
+/// The screenshot as the overlay shows it: dimmed everywhere, clean inside
+/// the selection. `pm`'s (0, 0) is screen pixel `origin`.
+fn background(ed: &Editor, idx: usize, pm: &mut PixmapMut, origin: (i32, i32)) {
+    let scr = &ed.screens[idx];
+    let sv = scr.view(ed.swap_rb);
+    let bounds = scr.bounds();
+    let (pw, ph) = (pm.width() as usize, pm.height() as usize);
+    let (bw, bh) = (scr.bg.width() as usize, scr.bg.height() as usize);
+    let (ox, oy) = (origin.0.max(0) as usize, origin.1.max(0) as usize);
+    let cols = pw.min(bw.saturating_sub(ox));
+    let sel_px = ed.lit().and_then(|r| r.intersect(&bounds)).map(|sel| {
+        let (x0, y0) = sv.px((sel.left(), sel.top()));
+        let (x1, y1) = sv.px((sel.right(), sel.bottom()));
+        (x0.round().max(0.0) as usize, y0.round().max(0.0) as usize, x1.round().max(0.0) as usize, y1.round().max(0.0) as usize)
+    });
+    let src = scr.bg.data();
+    let dst = pm.data_mut();
+    for y in 0..ph.min(bh.saturating_sub(oy)) {
+        let sy = oy + y;
+        let srow = &src[(sy * bw + ox) * 4..(sy * bw + ox + cols) * 4];
+        let drow = &mut dst[y * pw * 4..(y * pw + cols) * 4];
+        match sel_px {
+            Some((x0, y0, x1, y1)) if sy >= y0 && sy < y1 => {
+                // [dim | clean | dim], in this pixmap's columns
+                let a = x0.saturating_sub(ox).min(cols);
+                let b = x1.saturating_sub(ox).min(cols);
+                dim_copy(&mut drow[..a * 4], &srow[..a * 4]);
+                drow[a * 4..b * 4].copy_from_slice(&srow[a * 4..b * 4]);
+                dim_copy(&mut drow[b * 4..], &srow[b * 4..]);
+            }
+            _ => dim_copy(drow, srow),
+        }
     }
 }
 

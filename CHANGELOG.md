@@ -13,6 +13,10 @@ All notable changes are listed here. The format follows
   can go in Applications and Login Items. `clipt update` leaves it alone:
   a new version comes from the release page.
 
+### Fixed
+- Pixelating over a shape made the shape vanish: the blocks came from the
+  screenshot alone. They now blur whatever is underneath, drawings included.
+
 ## [0.6.0] - 2026-11-03
 
 ### Added

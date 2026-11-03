@@ -2,7 +2,7 @@
 //! desktop) coordinates; a `View` maps them into a pixmap's pixel space.
 
 use crate::text::{self, Fonts};
-use tiny_skia::{Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, PixmapMut, PixmapRef, Rect, Stroke, Transform};
+use tiny_skia::{Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PixmapMut, Rect, Stroke, Transform};
 
 pub type Pt = (f32, f32);
 
@@ -107,10 +107,57 @@ fn polyline(view: &View, pts: &[Pt]) -> Option<tiny_skia::Path> {
     pb.finish()
 }
 
+/// Paints the background for the source-space pixels starting at the given
+/// origin into a fresh pixmap, for pixelation that needs more than the target
+/// holds.
+pub type Fill<'a> = &'a dyn Fn(&mut PixmapMut, (i32, i32));
+
+/// Draw `shapes` in order onto `pm`, which already holds the background and
+/// whose (0, 0) is source pixel `view.off`. `size` is the whole source's size.
+///
+/// Pixelation averages what's under it, earlier shapes included, so it needs
+/// every pixel of each block it repaints. When `pm` is a partial repaint that
+/// cuts through blocks, those blocks are rebuilt in a scratch pixmap first:
+/// background from `fill`, then the shapes before this one.
+pub fn draw_all(pm: &mut PixmapMut, view: &View, size: (i32, i32), shapes: &[&Shape], fonts: &Fonts, fill: Fill) {
+    let origin = (view.off.0 as i32, view.off.1 as i32);
+    let here = (origin.0, origin.1, origin.0 + pm.width() as i32, origin.1 + pm.height() as i32);
+    for (k, shape) in shapes.iter().enumerate() {
+        let Shape::Pixelate { a, b, block } = shape else {
+            shape.draw(pm, view, fonts);
+            continue;
+        };
+        let Some(area) = pixelate_area(view, *a, *b, size) else { continue };
+        let bs = (block * view.scale).max(2.0).round() as i32;
+        let Some(need) = blocks_touching(area, bs, here) else { continue };
+        if need.0 >= here.0 && need.1 >= here.1 && need.2 <= here.2 && need.3 <= here.3 {
+            pixelate_blocks(pm, origin, area, bs, need);
+            continue;
+        }
+        let Some(mut tmp) = Pixmap::new((need.2 - need.0) as u32, (need.3 - need.1) as u32) else { continue };
+        let at = (need.0, need.1);
+        fill(&mut tmp.as_mut(), at);
+        let tv = View { off: (at.0 as f32, at.1 as f32), ..*view };
+        draw_all(&mut tmp.as_mut(), &tv, size, &shapes[..k], fonts, fill);
+        pixelate_blocks(&mut tmp.as_mut(), at, area, bs, need);
+        // Copy back the part this pixmap holds.
+        let (x0, y0, x1, y1) = (need.0.max(here.0), need.1.max(here.1), need.2.min(here.2), need.3.min(here.3));
+        let n = (x1 - x0) as usize * 4;
+        let (tw, pw) = (tmp.width() as usize * 4, pm.width() as usize * 4);
+        let src = tmp.data();
+        let dst = pm.data_mut();
+        for y in y0..y1 {
+            let si = (y - at.1) as usize * tw + (x0 - at.0) as usize * 4;
+            let di = (y - origin.1) as usize * pw + (x0 - origin.0) as usize * 4;
+            dst[di..di + n].copy_from_slice(&src[si..si + n]);
+        }
+    }
+}
+
 impl Shape {
-    /// `src` is the clean background for pixelation, with the offset that maps
-    /// target pixels to source pixels.
-    pub fn draw(&self, pm: &mut PixmapMut, view: &View, src: Option<(PixmapRef, (i32, i32))>, fonts: &Fonts) {
+    /// Draw this shape. Pixelation averages `pm` in place, so `pm` must hold
+    /// whole blocks: `draw_all` sees to that.
+    pub fn draw(&self, pm: &mut PixmapMut, view: &View, fonts: &Fonts) {
         let s = view.scale;
         let id = Transform::identity();
         match self {
@@ -171,8 +218,13 @@ impl Shape {
                 text::draw(pm, fonts.bold(), fs, p.0 - w / 2.0, p.1 - h / 2.0, &label, fg, view.swap_rb);
             }
             Shape::Pixelate { a, b, block } => {
-                if let (Some((src, off)), Some(r)) = (src, norm_rect(view.px(*a), view.px(*b))) {
-                    pixelate(pm, src, off, r, (block * s).max(2.0));
+                let origin = (view.off.0 as i32, view.off.1 as i32);
+                let here = (origin.0, origin.1, origin.0 + pm.width() as i32, origin.1 + pm.height() as i32);
+                let bs = (block * s).max(2.0).round() as i32;
+                if let Some(area) = pixelate_area(view, *a, *b, (here.2, here.3))
+                    && let Some(need) = blocks_touching(area, bs, here)
+                {
+                    pixelate_blocks(pm, origin, area, bs, need);
                 }
             }
         }
@@ -244,54 +296,58 @@ fn draw_arrow(pm: &mut PixmapMut, view: &View, a: Pt, b: Pt, color: Color, width
     }
 }
 
-/// Replace `r` (target pixel space) with block averages of `src`; target pixel
-/// (x, y) corresponds to source pixel (x + off.0, y + off.1). Blocks are aligned
-/// in source space so partial repaints line up with each other.
-fn pixelate(pm: &mut PixmapMut, src: PixmapRef, off: (i32, i32), r: Rect, block: f32) {
-    let bs = block.round().max(2.0) as i32;
-    let (sw, sh) = (src.width() as i32, src.height() as i32);
-    // Work in source coordinates, clipped to both images.
-    let x0 = (r.left().floor() as i32 + off.0).clamp(0, sw);
-    let y0 = (r.top().floor() as i32 + off.1).clamp(0, sh);
-    let x1 = (r.right().ceil() as i32 + off.0).clamp(0, sw);
-    let y1 = (r.bottom().ceil() as i32 + off.1).clamp(0, sh);
-    let (tw, th) = (pm.width() as i32, pm.height() as i32);
-    let sd = src.data();
-    let stride = src.width() as usize * 4;
-    let dstride = pm.width() as usize * 4;
-    let dd = pm.data_mut();
-    let mut by = y0;
-    while by < y1 {
-        let ey = (by + bs).min(y1);
-        let mut bx = x0;
-        while bx < x1 {
-            let ex = (bx + bs).min(x1);
-            if ex - off.0 <= 0 || bx - off.0 >= tw || ey - off.1 <= 0 || by - off.1 >= th {
-                bx = ex; // block not visible in this (partial) target
-                continue;
-            }
+/// The source-space pixels a pixelation covers, as (left, top, right,
+/// bottom) clipped to a source of `size`. Blocks start at its top left, so
+/// every repaint, partial or full, lines them up the same way.
+fn pixelate_area(view: &View, a: Pt, b: Pt, size: (i32, i32)) -> Option<(i32, i32, i32, i32)> {
+    let r = norm_rect(view.px(a), view.px(b))?;
+    let off = (view.off.0 as i32, view.off.1 as i32);
+    let x0 = (r.left().floor() as i32 + off.0).clamp(0, size.0);
+    let y0 = (r.top().floor() as i32 + off.1).clamp(0, size.1);
+    let x1 = (r.right().ceil() as i32 + off.0).clamp(0, size.0);
+    let y1 = (r.bottom().ceil() as i32 + off.1).clamp(0, size.1);
+    (x1 > x0 && y1 > y0).then_some((x0, y0, x1, y1))
+}
+
+/// The whole blocks of `area` (side `bs`) that touch `region`, all in source
+/// pixels.
+fn blocks_touching(area: (i32, i32, i32, i32), bs: i32, region: (i32, i32, i32, i32)) -> Option<(i32, i32, i32, i32)> {
+    let span = |a0: i32, a1: i32, r0: i32, r1: i32| {
+        let (v0, v1) = (a0.max(r0), a1.min(r1));
+        (v0 < v1).then(|| (a0 + (v0 - a0) / bs * bs, (a0 + (v1 - a0 + bs - 1) / bs * bs).min(a1)))
+    };
+    let (x0, x1) = span(area.0, area.2, region.0, region.2)?;
+    let (y0, y1) = span(area.1, area.3, region.1, region.3)?;
+    Some((x0, y0, x1, y1))
+}
+
+/// Replace each block of `area` within `need` (both source pixels, `need`
+/// block-aligned and inside `pm`) with its average. `pm`'s (0, 0) is source
+/// pixel `origin`.
+fn pixelate_blocks(pm: &mut PixmapMut, origin: (i32, i32), area: (i32, i32, i32, i32), bs: i32, need: (i32, i32, i32, i32)) {
+    let stride = pm.width() as usize * 4;
+    let d = pm.data_mut();
+    let mut by = need.1;
+    while by < need.3 {
+        let ey = (by + bs).min(area.3);
+        let mut bx = need.0;
+        while bx < need.2 {
+            let ex = (bx + bs).min(area.2);
+            let rows = || (by - origin.1) as usize..(ey - origin.1) as usize;
+            let cols = (bx - origin.0) as usize * 4..(ex - origin.0) as usize * 4;
             let mut acc = [0u32; 4];
-            let mut n = 0u32;
-            for y in by..ey {
-                let row = y as usize * stride;
-                for x in bx..ex {
-                    let i = row + x as usize * 4;
+            for y in rows() {
+                for p in d[y * stride..][cols.clone()].as_chunks::<4>().0 {
                     for c in 0..4 {
-                        acc[c] += sd[i + c] as u32;
+                        acc[c] += p[c] as u32;
                     }
-                    n += 1;
                 }
             }
-            if n == 0 {
-                bx = ex;
-                continue;
-            }
-            let px = [(acc[0] / n) as u8, (acc[1] / n) as u8, (acc[2] / n) as u8, (acc[3] / n) as u8];
-            for y in (by - off.1).max(0)..(ey - off.1).min(th) {
-                let row = y as usize * dstride;
-                for x in (bx - off.0).max(0)..(ex - off.0).min(tw) {
-                    let i = row + x as usize * 4;
-                    dd[i..i + 4].copy_from_slice(&px);
+            let n = ((ex - bx) * (ey - by)) as u32;
+            let px = acc.map(|v| (v / n) as u8);
+            for y in rows() {
+                for p in d[y * stride..][cols.clone()].as_chunks_mut::<4>().0 {
+                    *p = px;
                 }
             }
             bx = ex;
