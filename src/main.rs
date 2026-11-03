@@ -11,7 +11,6 @@ mod config;
 #[cfg(not(target_os = "macos"))]
 mod dbus;
 mod editor;
-#[cfg(not(target_os = "macos"))]
 mod icon;
 mod image;
 #[cfg(target_os = "macos")]
@@ -213,7 +212,20 @@ pub static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock:
 #[cfg(target_os = "macos")]
 fn run() -> Result<()> {
     START.get_or_init(std::time::Instant::now);
-    macos::run(parse_args()?, Config::load()?)
+    let args = parse_args()?;
+    if args.cmd == "debug-icon" {
+        return debug_icon(&args);
+    }
+    macos::run(args, Config::load()?)
+}
+
+/// `clipt debug-icon [-o PATH]`: a contact sheet of the icon's sizes, or,
+/// for a PATH ending in .icns, the macOS app icon (packaging/macos uses it).
+fn debug_icon(args: &Args) -> Result<()> {
+    let out = args.output.as_deref().unwrap_or("clipt-icon-preview.png");
+    let bytes = if out.ends_with(".icns") { icon::icns()? } else { icon::preview().encode_png()? };
+    std::fs::write(out, bytes)?;
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -232,9 +244,7 @@ fn run() -> Result<()> {
         b => Some(Backend::parse(b)?),
     };
     if args.cmd == "debug-icon" {
-        let out = args.output.as_deref().unwrap_or("clipt-icon-preview.png");
-        std::fs::write(out, icon::preview().encode_png()?)?;
-        return Ok(());
+        return debug_icon(&args);
     }
     if args.cmd == "tray" {
         return tray::run(
