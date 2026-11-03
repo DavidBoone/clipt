@@ -179,6 +179,12 @@ pub fn preview() -> crate::image::Image {
     to_image(&sheet)
 }
 
+/// The icon at `size`×`size` as a PNG (the macOS menu bar's).
+#[cfg(target_os = "macos")]
+pub fn png(size: u32) -> anyhow::Result<Vec<u8>> {
+    to_image(&render(size)).encode_png()
+}
+
 fn to_image(pm: &Pixmap) -> crate::image::Image {
     let mut img = crate::image::Image::new(pm.width(), pm.height());
     for (d, p) in img.data.as_chunks_mut::<4>().0.iter_mut().zip(pm.pixels()) {

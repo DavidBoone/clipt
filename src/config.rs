@@ -45,6 +45,11 @@ pub struct Config {
     pub record_separate_audio: bool,
     /// A recording stops by itself after this many seconds (0 = no limit).
     pub max_duration: u64,
+    /// macOS: the menu bar icon's shortcut to capture a region, such as
+    /// "cmd+shift+2" ("" for none).
+    pub hotkey: String,
+    /// macOS: the shortcut to copy the whole desktop ("" for none).
+    pub hotkey_full: String,
 }
 
 impl Default for Config {
@@ -69,6 +74,8 @@ impl Default for Config {
             record_audio_balance: "off".into(),
             record_separate_audio: false,
             max_duration: 3600,
+            hotkey: "cmd+shift+2".into(),
+            hotkey_full: String::new(),
         }
     }
 }
