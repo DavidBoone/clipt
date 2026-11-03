@@ -43,10 +43,14 @@ Decisions:
 `clipt list`, copy, save, notifications, window highlighting. CI builds a
 universal binary (`clipt-macos` artifact on each run of the `macos` job).
 
-**2. Menu bar icon and a hotkey.** `clipt tray` as an `NSStatusItem` with the
-Linux tray's menu, holding a global shortcut (`RegisterEventHotKey`, which
-needs no accessibility permission). Until then, a shortcut can run clipt
-through the Shortcuts app or a tool like skhd.
+**2. Menu bar icon and a hotkey.** `clipt tray` (`src/macos/tray.rs`), and
+what opening clipt.app with no arguments does: an `NSStatusItem` with the
+Linux tray's screenshot actions, Open at Login (`SMAppService`, macOS 13+,
+from the app only), and global shortcuts through `RegisterEventHotKey`,
+which needs no Accessibility permission: `hotkey` (a region, default
+`cmd+shift+2`) and `hotkey_full` (the whole desktop, off) in the config.
+Opening the app again while it runs captures a region. Each action starts a
+fresh `clipt`, as on Linux. The recording items come with phase 3.
 
 **3. Recording.** ScreenCaptureKit (`SCStream`, macOS 12.3+) for frames,
 ffmpeg's `h264_videotoolbox` encoder, the writer and camera as they are;
@@ -57,7 +61,7 @@ microphone, fed to the writer as PulseAudio is now.
 
 **App bundle.** `packaging/macos/build-app.sh` wraps the binary in
 `clipt.app` (bundle ID `io.github.jasondyck.clipt`, no Dock icon, the icon
-from `clipt debug-icon -o clipt.icns`). macOS then files the Screen
+drawn by `clipt debug-icon -o clipt.iconset` and packed by `iconutil`). macOS then files the Screen
 Recording permission under clipt itself, not the terminal or launcher that
 ran it, and the app can live in Applications and Login Items. CI uploads it
 as `clipt-app.zip` inside the `clipt-macos` artifact; releases carry

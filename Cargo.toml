@@ -47,8 +47,9 @@ zbus = { version = "6", default-features = false, features = ["default-rt", "pro
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
-    "std", "NSApplication", "NSBitmapImageRep", "NSColor", "NSCursor", "NSEvent", "NSGraphics", "NSImageRep",
-    "NSPasteboard", "NSResponder", "NSRunningApplication", "NSScreen", "NSView", "NSWindow", "objc2-core-foundation",
+    "std", "NSApplication", "NSBitmapImageRep", "NSButton", "NSCell", "NSColor", "NSControl", "NSCursor", "NSEvent", "NSGraphics",
+    "NSImage", "NSImageRep", "NSMenu", "NSMenuItem", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSScreen",
+    "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSView", "NSWindow", "objc2-core-foundation",
     "objc2-quartz-core",
 ] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFArray", "CFCGTypes", "CFData", "CFDictionary", "CFNumber", "CFString"] }
@@ -57,8 +58,9 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "CGImage", "CGWindow", "objc2",
 ] }
 objc2-io-surface = { version = "0.3", default-features = false, features = ["std", "IOSurfaceRef", "IOSurfaceTypes", "libc", "objc2", "objc2-core-foundation"] }
+objc2-service-management = { version = "0.3", default-features = false, features = ["std", "SMAppService", "objc2", "objc2-foundation"] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
-    "std", "NSArray", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSGeometry", "NSObjCRuntime", "NSRunLoop", "NSString", "NSValue",
+    "std", "NSArray", "NSBundle", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSObjCRuntime", "NSRunLoop", "NSString", "NSValue",
 ] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CALayer", "CATransaction", "objc2-core-foundation"] }
 
