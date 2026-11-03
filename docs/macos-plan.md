@@ -74,8 +74,14 @@ over that picture (`Editor::paste`), as if brought to the front: with
 ScreenCaptureKit's `SCScreenshotManager` from macOS 14, and before that
 `CGWindowListCreateImage`, looked up at run time.
 
-**4. Sound.** ScreenCaptureKit's system audio (macOS 13+) and the
-microphone, fed to the writer as PulseAudio is now.
+**4. Sound.** `src/macos/sound.rs`, behind the same `check`, `open` and
+`Capture::run` as PulseAudio's (`src/record/audio/pulse.rs`). `system` is
+ScreenCaptureKit's audio (macOS 13+) on a stream of its own, leaving
+clipt's own sound out; `mic` is the default input through an Audio Queue,
+which converts to 48 kHz 16-bit stereo itself (`NSMicrophoneUsageDescription`
+in Info.plist; macOS asks once). Buffers are stamped from the host clock,
+which `Instant` runs on. Silence fills in when ScreenCaptureKit sends
+nothing. Not yet: devices by name, and `clipt list sound`.
 
 **App bundle.** `packaging/macos/build-app.sh` wraps the binary in
 `clipt.app` (bundle ID `io.github.jasondyck.clipt`, no Dock icon, the icon

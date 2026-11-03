@@ -6,6 +6,7 @@ mod capture;
 mod clipboard;
 mod overlay;
 pub(crate) mod record;
+pub(crate) mod sound;
 mod tray;
 mod window_shot;
 mod windows;
@@ -42,11 +43,17 @@ OPTIONS:
         --cursor          Include the pointer
         --fps N           Recording frame rate (default: record_fps, 30)
         --gif             Save the recording as a GIF (at most 15 fps)
+        --audio[=SOURCES] Record sound: system (macOS 13+), mic, or both;
+                          \"system:70,mic\" sets volumes (default: record_audio)
+        --no-audio        Record without sound, whatever record_audio says
+        --audio-balance=MODE  off (default), duck or smart: the mic over the rest
+        --separate-audio  Also keep each source as its own track
     -h, --help            Show this help
     -V, --version         Show the version
 
 EDITOR KEYS:
     drag                  select (click = whole screen; drag handles to resize)
+    S / M / G (recording) computer sound / microphone / GIF on or off
     V R E A L P M T X N   select, rect, ellipse, arrow, line, pen, highlighter,
                           text, pixelate, counter
     1-8                   colour          scroll / [ ]   stroke width
@@ -56,7 +63,8 @@ EDITOR KEYS:
 
 Config: ~/.config/clipt/config.toml (save_dir, filename, color, palette, width,
 copy_on_save, notify, cursor, font, hotkey, hotkey_full, video_dir,
-record_fps, record_codec, record_format, max_duration). hotkey is the
+record_fps, record_codec, record_format, record_audio, record_audio_balance,
+record_separate_audio, max_duration). hotkey is the
 tray's shortcut for a region, default \"cmd+shift+2\"; \"\" turns it off.
 clipt needs the Screen Recording permission (System Settings > Privacy &
 Security) for the app it runs from. Recording needs ffmpeg (brew install ffmpeg).
@@ -188,13 +196,14 @@ fn record_cmd(mut args: Args, cfg: &Config) -> Result<()> {
     if let Some(cmd) = args.pause.take() {
         return record::pause(cmd);
     }
-    if args.audio.as_deref().is_some_and(|a| a != "none") || args.separate_audio || args.audio_balance.is_some() {
-        bail!("recording sound isn't available on macOS yet");
-    }
     if args.backend.is_some() {
         bail!("--backend: macOS has only the one");
     }
     record::ensure_idle()?;
+    // Before the overlay: a bad setting stops here.
+    let mut audio = record::audio::Source::parse(args.audio.as_deref().unwrap_or(&cfg.record_audio))?;
+    let balance = record::Balance::parse(args.audio_balance.as_deref().unwrap_or(&cfg.record_audio_balance))?;
+    record::audio::check(&audio)?;
     let mtm = MainThreadMarker::new().context("not on the main thread")?;
     let cursor = args.cursor || cfg.cursor;
     if args.delay > 0.0 {
@@ -213,13 +222,18 @@ fn record_cmd(mut args: Args, cfg: &Config) -> Result<()> {
                 .with_context(|| format!("no window of an app named '{app}'"))?;
             Target::Window(w)
         }
-        (None | Some("region" | "window"), None) => match pick_recording_area(cfg, &args, cursor, mtm)? {
-            Some((t, g)) => {
-                gif = Some(g);
-                t
+        (None | Some("region" | "window"), None) => {
+            let (system, mic) = record::audio::Source::toggles(&audio);
+            match pick_recording_area(cfg, &args, cursor, crate::editor::SoundToggles { system, mic }, mtm)? {
+                Some((t, g, s)) => {
+                    gif = Some(g);
+                    audio = record::audio::Source::with_toggles(audio, s.system, s.mic);
+                    record::audio::check(&audio)?;
+                    t
+                }
+                None => return Ok(()), // cancelled
             }
-            None => return Ok(()), // cancelled
-        },
+        }
         (Some(m), None) => bail!("unknown recording mode '{m}' (screen, region, window, or -g GEOM)"),
     };
     let opts = record::Options {
@@ -228,16 +242,22 @@ fn record_cmd(mut args: Args, cfg: &Config) -> Result<()> {
         fps: args.fps,
         cursor,
         gif,
-        audio: Vec::new(),
-        separate_audio: false,
-        balance: record::Balance::default(),
+        audio,
+        separate_audio: args.separate_audio || cfg.record_separate_audio,
+        balance,
     };
     record::run(cfg, opts)
 }
 
-/// The overlay in record mode: the area dragged or the window clicked, and
-/// whether to save a GIF; `None` if cancelled.
-fn pick_recording_area(cfg: &Config, args: &Args, cursor: bool, mtm: MainThreadMarker) -> Result<Option<(crate::record::Target, bool)>> {
+/// The overlay in record mode: the area dragged or the window clicked,
+/// whether to save a GIF, and the sound as toggled; `None` if cancelled.
+fn pick_recording_area(
+    cfg: &Config,
+    args: &Args,
+    cursor: bool,
+    sound: crate::editor::SoundToggles,
+    mtm: MainThreadMarker,
+) -> Result<Option<(crate::record::Target, bool, crate::editor::SoundToggles)>> {
     use crate::record::Target;
     capture::ensure_permission()?;
     let font_path = cfg.font.clone();
@@ -249,6 +269,7 @@ fn pick_recording_area(cfg: &Config, args: &Args, cursor: bool, mtm: MainThreadM
     let fonts = fonts.join().map_err(|_| anyhow::anyhow!("font loader panicked"))??;
     let mut ed = Editor::new(shots, fonts, true, cfg.color.saturating_sub(1), cfg.width);
     ed.record = true;
+    ed.sound = sound;
     ed.gif = crate::wants_gif(cfg, args);
     ed.windows = wins.join().unwrap_or_default();
     let mut session = overlay::Session::new(ed, mtm)?;
@@ -258,7 +279,7 @@ fn pick_recording_area(cfg: &Config, args: &Args, cursor: bool, mtm: MainThreadM
         return Ok(None);
     }
     let ed = session.editor();
-    let gif = ed.gif;
+    let (gif, sound) = (ed.gif, ed.sound);
     let r = ed.final_rect().context("nothing selected")?;
     let target = match ed.selected_window() {
         Some(w) => Target::Window(w.clone()),
@@ -266,7 +287,7 @@ fn pick_recording_area(cfg: &Config, args: &Args, cursor: bool, mtm: MainThreadM
     };
     // Before the first frame, and before the recording keeps this thread.
     session.dismiss();
-    Ok(Some((target, gif)))
+    Ok(Some((target, gif, sound)))
 }
 
 /// A notification through AppleScript, which needs no app bundle (it shows

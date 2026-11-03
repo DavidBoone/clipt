@@ -17,6 +17,10 @@ All notable changes are listed here. The format follows
 - The tray menu ticks *Record as GIF*, *Copy when saving* and
   *Notifications*, saved in the config, and *Settings…* opens the config
   file. The macOS menu bar has the last three.
+- macOS: recordings with sound: the computer's (macOS 13+, through
+  ScreenCaptureKit) and the microphone's, toggled in the overlay with S
+  and M or set by `--audio` and `record_audio`, with the same mixing,
+  balance and separate tracks as on Linux.
 - macOS: clicking a window in the screenshot overlay brings it to the
   front: it's captured on its own, so the parts other windows covered show
   and are saved.
