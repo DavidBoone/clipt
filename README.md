@@ -199,11 +199,13 @@ gdbus call --session --dest org.freedesktop.impl.portal.PermissionStore \
 
 ### macOS (preview)
 
-Screenshots work on macOS (recording and the menu bar icon don't yet), but
-no one has tried them on a real Mac. Each release has a universal binary,
-`clipt-vX.Y.Z-universal-macos.tar.gz`, signed with a Developer ID and
-notarised by Apple; put `clipt` somewhere on your `PATH`, and `clipt update`
-keeps it current:
+Screenshots work on macOS (recording and the menu bar icon don't yet), and
+have been tried on one Mac so far. Each release has `clipt.app`
+(`clipt-vX.Y.Z-macos-app.zip`; drag it to Applications, and macOS asks once
+to let clipt record the screen) and a universal binary for the command line,
+`clipt-vX.Y.Z-universal-macos.tar.gz`, both signed with a Developer ID and
+notarised by Apple. Put the binary somewhere on your `PATH`, and
+`clipt update` keeps it current:
 
 ```
 tar xzf clipt-*-universal-macos.tar.gz

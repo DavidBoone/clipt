@@ -6,6 +6,13 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- macOS: `clipt.app`, in each release as `clipt-vX.Y.Z-macos-app.zip`,
+  signed, notarised and stapled. macOS keeps its Screen Recording
+  permission under clipt rather than the terminal that started it, and it
+  can go in Applications and Login Items. `clipt update` leaves it alone:
+  a new version comes from the release page.
+
 ## [0.6.0] - 2026-11-03
 
 ### Added
