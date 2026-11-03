@@ -1,9 +1,11 @@
 //! Sound for recordings on macOS, as the 48 kHz 16-bit stereo chunks the
 //! writer takes on Linux too:
 //!
-//! - `system`, what the computer plays: ScreenCaptureKit (macOS 13+), on a
-//!   stream of its own whose picture is ignored. Covered by the Screen
-//!   Recording permission; clipt's own sound is left out.
+//! - `system`, what the computer plays: ScreenCaptureKit (macOS 13+), from
+//!   the same stream as the picture (`record.rs`), as Apple intends: a
+//!   second stream of the display halved the frame rate. Covered by the
+//!   Screen Recording permission; clipt's own sound is left out. A window
+//!   recorded on its own brings its app's sound only.
 //! - `mic`, the default input: an Audio Queue (every macOS clipt runs on),
 //!   which converts from the device's format. macOS asks for the Microphone
 //!   permission the first time.
@@ -13,17 +15,12 @@
 //! nothing arrives (ScreenCaptureKit may send nothing while all is silent)
 //! silence fills in, so the writer always hears from every source.
 
-use super::record::{REPLY_LIMIT, Sendable, error_text, shareable_content};
 use crate::record::audio::{BYTES_PER_FRAME, CHANNELS, CHUNK_FRAMES, Chunk, Device, RATE, Source};
-use anyhow::{Result, anyhow, bail};
-use block2::RcBlock;
-use dispatch2::DispatchQueue;
-use objc2::rc::Retained;
-use objc2::runtime::{AnyClass, ProtocolObject};
-use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send, sel};
-use objc2_core_media::{CMSampleBuffer, CMTime};
-use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
-use objc2_screen_capture_kit::{SCContentFilter, SCStream, SCStreamConfiguration, SCStreamDelegate, SCStreamOutput, SCStreamOutputType};
+use anyhow::{Result, bail};
+use objc2::runtime::AnyClass;
+use objc2::sel;
+use objc2_core_media::CMSampleBuffer;
+use objc2_screen_capture_kit::SCStreamConfiguration;
 use std::ffi::c_void;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -61,7 +58,8 @@ pub struct Capture {
 }
 
 enum Kind {
-    System(Sendable<(Retained<SCContentFilter>, Retained<SCStreamConfiguration>)>),
+    /// Fed by the picture's stream, through `SYSTEM`.
+    System,
     Mic(Mic),
 }
 
@@ -70,7 +68,7 @@ enum Kind {
 pub fn open(src: &Source) -> Result<Capture> {
     check(std::slice::from_ref(src))?;
     let kind = match src.device {
-        Device::System => Kind::System(Sendable(system_stream()?)),
+        Device::System => Kind::System,
         Device::Mic => Kind::Mic(Mic::open()?),
         Device::Named(_) => unreachable!("check refuses named devices"),
     };
@@ -81,9 +79,12 @@ impl Capture {
     /// Hand chunks to `sink` until it returns false.
     pub fn run(self, sink: impl FnMut(Chunk) -> bool) -> Result<()> {
         match self.kind {
-            Kind::System(parts) => {
-                let (filter, config) = parts.into_inner();
-                run_system(&filter, &config, sink)
+            Kind::System => {
+                let (tx, rx) = mpsc::channel();
+                *SYSTEM.lock().unwrap() = Some(tx);
+                let r = deliver(&rx, sink);
+                *SYSTEM.lock().unwrap() = None;
+                r
             }
             Kind::Mic(mic) => mic.run(sink),
         }
@@ -181,68 +182,28 @@ unsafe extern "C" {
     fn CMAudioFormatDescriptionGetStreamBasicDescription(desc: *const c_void) -> *const Asbd;
 }
 
-/// A stream of the main display whose picture is two pixels once a second,
-/// for its sound.
-fn system_stream() -> Result<(Retained<SCContentFilter>, Retained<SCStreamConfiguration>)> {
-    let content = shareable_content()?;
-    let displays = unsafe { content.displays() };
-    let display = displays.iter().next().ok_or_else(|| anyhow!("ScreenCaptureKit lists no displays"))?;
-    let filter = unsafe { SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &display, &NSArray::new()) };
-    let config = unsafe { SCStreamConfiguration::new() };
+/// Where the computer's sound goes while it's being recorded.
+static SYSTEM: Mutex<Option<mpsc::Sender<Event>>> = Mutex::new(None);
+
+/// Have the picture's stream bring the computer's sound too.
+pub fn configure(config: &SCStreamConfiguration) {
     unsafe {
         config.setCapturesAudio(true);
         config.setSampleRate(RATE as isize);
         config.setChannelCount(CHANNELS as isize);
         config.setExcludesCurrentProcessAudio(true);
-        config.setWidth(2);
-        config.setHeight(2);
-        config.setMinimumFrameInterval(CMTime::new(1, 1));
     }
-    Ok((filter, config))
 }
 
-pub struct SoundIvars {
-    events: Mutex<mpsc::Sender<Event>>,
-}
-
-define_class!(
-    /// The sound stream's output and delegate.
-    #[unsafe(super(NSObject))]
-    #[name = "CliptSoundOutput"]
-    #[ivars = SoundIvars]
-    struct SoundOutput;
-
-    unsafe impl NSObjectProtocol for SoundOutput {}
-
-    unsafe impl SCStreamOutput for SoundOutput {
-        #[unsafe(method(stream:didOutputSampleBuffer:ofType:))]
-        fn did_output(&self, _stream: &SCStream, buffer: &CMSampleBuffer, kind: SCStreamOutputType) {
-            if kind != SCStreamOutputType::Audio {
-                return; // the picture, which nobody wants
-            }
-            let event = match convert(buffer) {
-                Ok(Some(c)) => Event::Sound(c),
-                Ok(None) => return,
-                Err(e) => Event::Failed(format!("{e:#}")),
-            };
-            let _ = self.ivars().events.lock().unwrap().send(event);
-        }
-    }
-
-    unsafe impl SCStreamDelegate for SoundOutput {
-        #[unsafe(method(stream:didStopWithError:))]
-        fn did_stop(&self, _stream: &SCStream, error: &NSError) {
-            let e = format!("ScreenCaptureKit stopped the sound: {}", error.localizedDescription());
-            let _ = self.ivars().events.lock().unwrap().send(Event::Failed(e));
-        }
-    }
-);
-
-impl SoundOutput {
-    fn new(events: mpsc::Sender<Event>) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(SoundIvars { events: Mutex::new(events) });
-        unsafe { msg_send![super(this), init] }
-    }
+/// A buffer of the computer's sound from the picture's stream, on its queue.
+pub fn system_sound(buffer: &CMSampleBuffer) {
+    let Some(tx) = SYSTEM.lock().unwrap().clone() else { return };
+    let event = match convert(buffer) {
+        Ok(Some(c)) => Event::Sound(c),
+        Ok(None) => return,
+        Err(e) => Event::Failed(format!("{e:#}")),
+    };
+    let _ = tx.send(event);
 }
 
 /// A sample buffer of sound as a chunk of 16-bit stereo, stamped with when
@@ -298,37 +259,6 @@ fn convert(buffer: &CMSampleBuffer) -> Result<Option<Chunk>> {
         Instant::now()
     };
     Ok(Some(Chunk { at, data: out }))
-}
-
-fn run_system(filter: &SCContentFilter, config: &SCStreamConfiguration, sink: impl FnMut(Chunk) -> bool) -> Result<()> {
-    let (tx, rx) = mpsc::channel();
-    let output = SoundOutput::new(tx);
-    let stream = unsafe {
-        SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), filter, config, Some(ProtocolObject::from_ref(&*output)))
-    };
-    let queue = DispatchQueue::new("io.github.jasondyck.clipt.sound", None);
-    // The picture too, to be dropped quietly rather than complained about.
-    for kind in [SCStreamOutputType::Audio, SCStreamOutputType::Screen] {
-        unsafe { stream.addStreamOutput_type_sampleHandlerQueue_error(ProtocolObject::from_ref(&*output), kind, Some(&queue)) }
-            .map_err(|e| anyhow!("ScreenCaptureKit: {}", e.localizedDescription()))?;
-    }
-    if let Some(e) = call(|done| unsafe { stream.startCaptureWithCompletionHandler(Some(done)) })? {
-        bail!("ScreenCaptureKit didn't start recording the sound: {e}");
-    }
-    let r = deliver(&rx, sink);
-    let _ = call(|done| unsafe { stream.stopCaptureWithCompletionHandler(Some(done)) });
-    r
-}
-
-/// Call a method that reports back through a completion handler taking an
-/// error, and wait for it: the error's text, if any.
-fn call(f: impl FnOnce(&block2::DynBlock<dyn Fn(*mut NSError)>)) -> Result<Option<String>> {
-    let (tx, rx) = mpsc::channel();
-    let done = RcBlock::new(move |e: *mut NSError| {
-        let _ = tx.send(error_text(e));
-    });
-    f(&done);
-    rx.recv_timeout(REPLY_LIMIT).map_err(|_| anyhow!("ScreenCaptureKit didn't answer within {} s", REPLY_LIMIT.as_secs()))
 }
 
 // ---- the microphone: an Audio Queue ------------------------------------------

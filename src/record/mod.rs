@@ -313,7 +313,8 @@ pub fn run(cfg: &Config, opts: Options) -> Result<()> {
     #[cfg(not(target_os = "macos"))]
     let capture = linux::capture(&opts.target, opts.backend, opts.cursor, interval)?;
     #[cfg(target_os = "macos")]
-    let capture = crate::macos::record::capture(&opts.target, opts.cursor, interval)?;
+    let capture =
+        crate::macos::record::capture(&opts.target, opts.cursor, interval, opts.audio.iter().any(|a| a.device == audio::Device::System))?;
     let zoom = capture.zoom;
 
     let gif_format = match (opts.gif, cfg.record_format.as_str()) {

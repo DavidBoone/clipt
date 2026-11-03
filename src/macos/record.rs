@@ -4,8 +4,10 @@
 //! A display is captured with `sourceRect` cropping it to the area, so the
 //! window server does the cropping and scaling; a window is captured on its
 //! own (`desktopIndependentWindow`), even while something covers it. Frames
-//! arrive as BGRA pixel buffers on a dispatch queue of ours, are copied out
-//! and go to the writer's newest-frame slot; a still screen sends nothing.
+//! arrive as NV12 pixel buffers, the encoder's own format, on a dispatch
+//! queue of ours, are copied out and go to the writer's newest-frame slot;
+//! a still screen sends nothing. The computer's sound, when recorded, comes
+//! on the same stream (`sound.rs`).
 
 use crate::capture::{PixelOrder, VideoFrame};
 use crate::record::{Capture, Sink, Target};
@@ -20,8 +22,9 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGDisplayBounds;
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::{
-    CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
-    CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress, kCVPixelFormatType_32BGRA,
+    CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane,
+    CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
 };
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
 use objc2_screen_capture_kit::{
@@ -73,6 +76,9 @@ define_class!(
     unsafe impl SCStreamOutput for Output {
         #[unsafe(method(stream:didOutputSampleBuffer:ofType:))]
         fn did_output(&self, _stream: &SCStream, buffer: &CMSampleBuffer, kind: SCStreamOutputType) {
+            if kind == SCStreamOutputType::Audio {
+                return super::sound::system_sound(buffer);
+            }
             if kind != SCStreamOutputType::Screen {
                 return;
             }
@@ -102,24 +108,31 @@ impl Output {
     }
 }
 
-/// The picture in a sample buffer, as packed BGRx rows.
+/// The picture in a sample buffer: NV12, its two planes packed.
 fn copy_frame(buffer: &CMSampleBuffer) -> Option<VideoFrame> {
     let px = unsafe { buffer.image_buffer() }?;
     if unsafe { CVPixelBufferLockBaseAddress(&px, CVPixelBufferLockFlags::ReadOnly) } != 0 {
         return None;
     }
-    let (w, h, stride) = (CVPixelBufferGetWidth(&px), CVPixelBufferGetHeight(&px), CVPixelBufferGetBytesPerRow(&px));
-    let base = CVPixelBufferGetBaseAddress(&px) as *const u8;
-    let frame = (!base.is_null() && w > 0 && h > 0).then(|| {
-        let row = w * 4;
-        let mut data = Vec::with_capacity(row * h);
-        for y in 0..h {
-            data.extend_from_slice(unsafe { std::slice::from_raw_parts(base.add(y * stride), row) });
-        }
-        VideoFrame { width: w as u32, height: h as u32, order: PixelOrder::Bgrx, data }
-    });
+    let (w, h) = (CVPixelBufferGetWidth(&px), CVPixelBufferGetHeight(&px));
+    let mut data = Vec::with_capacity(w * h * 3 / 2);
+    // Luma, w x h; then chroma, U and V interleaved, w bytes x h / 2.
+    let ok = w > 0
+        && h > 0
+        && (0..2).all(|plane| {
+            let base = CVPixelBufferGetBaseAddressOfPlane(&px, plane) as *const u8;
+            let stride = CVPixelBufferGetBytesPerRowOfPlane(&px, plane);
+            let rows = CVPixelBufferGetHeightOfPlane(&px, plane);
+            if base.is_null() || stride < w || rows < h.div_ceil(1 + plane) {
+                return false;
+            }
+            for y in 0..h.div_ceil(1 + plane) {
+                data.extend_from_slice(unsafe { std::slice::from_raw_parts(base.add(y * stride), w) });
+            }
+            true
+        });
     unsafe { CVPixelBufferUnlockBaseAddress(&px, CVPixelBufferLockFlags::ReadOnly) };
-    frame
+    ok.then_some(VideoFrame { width: w as u32, height: h as u32, order: PixelOrder::Nv12, data })
 }
 
 /// An NSError from a completion handler, as text; `None` for no error.
@@ -147,7 +160,8 @@ pub(super) fn shareable_content() -> Result<Retained<SCShareableContent>> {
 
 /// Frames for `target`, checked and set up here; the stream itself starts
 /// on the capture thread.
-pub(crate) fn capture(target: &Target, cursor: bool, interval: Duration) -> Result<Capture> {
+/// `system_sound`: the computer's sound comes with it (see `sound.rs`).
+pub(crate) fn capture(target: &Target, cursor: bool, interval: Duration, system_sound: bool) -> Result<Capture> {
     let mtm = MainThreadMarker::new().context("not on the main thread")?;
     // ScreenCaptureKit needs the window server connection AppKit makes.
     let _ = NSApplication::sharedApplication(mtm);
@@ -189,22 +203,29 @@ pub(crate) fn capture(target: &Target, cursor: bool, interval: Duration) -> Resu
             (filter, (w * scale, h * scale))
         }
     };
-    let (w, h) = (size.0.round().max(2.0) as usize, size.1.round().max(2.0) as usize);
+    // Even: NV12's chroma is a pixel per two.
+    let even = |v: f64| (v.round() as usize).max(2) & !1;
+    let (w, h) = (even(size.0), even(size.1));
     unsafe {
         config.setWidth(w);
         config.setHeight(h);
-        config.setPixelFormat(kCVPixelFormatType_32BGRA);
+        // What the encoder takes, so ffmpeg converts nothing, at 1.5 bytes a
+        // pixel rather than BGRA's 4.
+        config.setPixelFormat(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
         config.setShowsCursor(cursor);
         config.setMinimumFrameInterval(CMTime::new(interval.as_micros() as i64, 1_000_000));
         // A few frames in hand, so a slow copy doesn't stall the stream.
         config.setQueueDepth(5);
+    }
+    if system_sound {
+        super::sound::configure(&config);
     }
     crate::record::debug(&format!("ScreenCaptureKit stream: {w}x{h} pixels"));
 
     let parts = Sendable((filter, config));
     let stream = Box::new(move |sink: Sink| -> Result<()> {
         let (filter, config) = parts.into_inner();
-        run_stream(&filter, &config, sink)
+        run_stream(&filter, &config, sink, system_sound)
     });
     Ok(Capture { zoom: false, start: Box::new(|| {}), stream })
 }
@@ -216,16 +237,17 @@ fn scale(out: &crate::capture::Output) -> f64 {
 
 /// Start the stream and keep it running until the writer stops or
 /// ScreenCaptureKit does.
-fn run_stream(filter: &SCContentFilter, config: &SCStreamConfiguration, sink: Sink) -> Result<()> {
+fn run_stream(filter: &SCContentFilter, config: &SCStreamConfiguration, sink: Sink, sound: bool) -> Result<()> {
     let (tx, rx) = mpsc::channel();
     let output = Output::new(sink, tx);
     let delegate = ProtocolObject::from_ref(&*output);
     let stream = unsafe { SCStream::initWithFilter_configuration_delegate(SCStream::alloc(), filter, config, Some(delegate)) };
     let queue = DispatchQueue::new("io.github.jasondyck.clipt.record", None);
-    unsafe {
-        stream.addStreamOutput_type_sampleHandlerQueue_error(ProtocolObject::from_ref(&*output), SCStreamOutputType::Screen, Some(&queue))
+    let kinds: &[_] = if sound { &[SCStreamOutputType::Screen, SCStreamOutputType::Audio] } else { &[SCStreamOutputType::Screen] };
+    for &kind in kinds {
+        unsafe { stream.addStreamOutput_type_sampleHandlerQueue_error(ProtocolObject::from_ref(&*output), kind, Some(&queue)) }
+            .map_err(|e| anyhow!("ScreenCaptureKit: {}", e.localizedDescription()))?;
     }
-    .map_err(|e| anyhow!("ScreenCaptureKit: {}", e.localizedDescription()))?;
 
     if let Some(e) = call(|done| unsafe { stream.startCaptureWithCompletionHandler(Some(done)) })? {
         bail!("ScreenCaptureKit didn't start recording: {e}");
