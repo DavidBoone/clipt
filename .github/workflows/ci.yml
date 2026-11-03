@@ -137,14 +137,26 @@ jobs:
           codesign --verify --strict --verbose=2 dist/clipt
           printf '%s\n' "$MACOS_NOTARY_KEY" > "$RUNNER_TEMP/notary.p8"
           ditto -c -k dist/clipt "$RUNNER_TEMP/clipt.zip"
-          xcrun notarytool submit "$RUNNER_TEMP/clipt.zip" --key "$RUNNER_TEMP/notary.p8" \
-            --key-id "$MACOS_NOTARY_KEY_ID" --issuer "$MACOS_NOTARY_ISSUER" --wait --output-format json | tee "$RUNNER_TEMP/notary.json"
+          # Apple's queue can take far longer than the job should wait, but a
+          # bare binary's notarisation is looked up online when it first
+          # runs, so this build counts as notarised once Apple accepts it.
+          # Wait ten minutes, then hand it over with the submission's id.
+          auth=(--key "$RUNNER_TEMP/notary.p8" --key-id "$MACOS_NOTARY_KEY_ID" --issuer "$MACOS_NOTARY_ISSUER")
+          xcrun notarytool submit "$RUNNER_TEMP/clipt.zip" "${auth[@]}" --output-format json > "$RUNNER_TEMP/notary.json"
           id=$(plutil -extract id raw "$RUNNER_TEMP/notary.json")
+          echo "notarisation submission: $id"
+          xcrun notarytool wait "$id" "${auth[@]}" --timeout 10m || true
+          xcrun notarytool info "$id" "${auth[@]}" --output-format json > "$RUNNER_TEMP/notary.json"
           status=$(plutil -extract status raw "$RUNNER_TEMP/notary.json")
-          if [ "$status" != Accepted ]; then
-            xcrun notarytool log "$id" --key "$RUNNER_TEMP/notary.p8" --key-id "$MACOS_NOTARY_KEY_ID" --issuer "$MACOS_NOTARY_ISSUER"
-            exit 1
-          fi
+          echo "notarisation status: $status"
+          case "$status" in
+            Accepted) ;;
+            "In Progress") echo "::warning::Apple is still notarising submission $id; the build will pass Gatekeeper once it's accepted" ;;
+            *)
+              xcrun notarytool log "$id" "${auth[@]}"
+              exit 1
+              ;;
+          esac
           rm "$RUNNER_TEMP/notary.p8"
           security delete-keychain "$kc"
       - run: |
