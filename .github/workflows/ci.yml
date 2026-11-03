@@ -100,7 +100,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # The examples are the Linux end-to-end tests' input driver and window.
       - run: cargo clippy --bins --tests --locked -- -D warnings
-      - run: cargo test --locked
+      - run: cargo test --locked --bins
       - run: |
           cargo build --release --locked --target aarch64-apple-darwin
           cargo build --release --locked --target x86_64-apple-darwin

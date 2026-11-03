@@ -35,7 +35,7 @@ what the change can break:
 | Capture, overlay, editor input, recording, clipboard | also the matching `tests/e2e.sh IMAGE LAYOUT` suite (needs Docker), e.g. `tests/e2e.sh sway single` |
 | Dependencies (`Cargo.toml`, `Cargo.lock`) | also `cargo deny check` and `packaging/flatpak/cargo-sources.py` (commit the regenerated `cargo-sources.json`) |
 | Code behind the `pipewire` feature, or `#[cfg]`s | also `cargo clippy --no-default-features --all-targets -- -D warnings` |
-| `src/macos/`, or anything shared with it | also `cargo clippy --target aarch64-apple-darwin --bins --tests -- -D warnings` (type-checks from Linux; `rustup target add aarch64-apple-darwin`). Only CI's `macos` job, or a Mac, runs it |
+| `src/macos/`, or anything shared with it | also `cargo clippy --target aarch64-apple-darwin --bins --tests -- -D warnings` (type-checks from Linux; `rustup target add aarch64-apple-darwin`). Only CI's `macos` job, or a Mac, runs the tests: `cargo test --bins`, since the examples are Linux-only |
 
 Notes:
 - CI's clippy is the latest stable toolchain, which has lints older local
