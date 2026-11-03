@@ -263,10 +263,8 @@ fn pick_recording_area(cfg: &Config, args: &Args, cursor: bool, mtm: MainThreadM
         Some(w) => Target::Window(w.clone()),
         None => Target::Rect((r.left() as f64, r.top() as f64, r.width() as f64, r.height() as f64)),
     };
-    session.hide();
-    drop(session);
-    // Let the window server take the overlay down before the first frame.
-    std::thread::sleep(std::time::Duration::from_millis(150));
+    // Before the first frame, and before the recording keeps this thread.
+    session.dismiss();
     Ok(Some((target, gif)))
 }
 
