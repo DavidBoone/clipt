@@ -435,6 +435,7 @@ impl Keymap {
             0xff1b => Key::Escape,
             0xff0d | 0xff8d => Key::Enter,
             0xff08 => Key::Backspace,
+            0xffff | 0xff9f => Key::Delete,
             0xff51 => Key::Left,
             0xff52 => Key::Up,
             0xff53 => Key::Right,

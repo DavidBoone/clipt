@@ -12,6 +12,9 @@ pub struct Config {
     pub filename: String,
     /// Starting colour, 1-8 (red, orange, yellow, green, blue, purple, white, black).
     pub color: usize,
+    /// Colours 1-8 as "#rrggbb". Right-clicking one in the editor changes it
+    /// and writes this back.
+    pub palette: Vec<String>,
     /// Starting stroke width in logical pixels.
     pub width: f32,
     /// Saving from the editor also copies to the clipboard.
@@ -58,6 +61,7 @@ impl Default for Config {
             save_dir: "~/Pictures/Screenshots".into(),
             filename: "Screenshot_%Y-%m-%d_%H-%M-%S".into(),
             color: 1,
+            palette: crate::editor::PALETTE.iter().map(|&c| hex(c)).collect(),
             width: 4.0,
             copy_on_save: true,
             notify: true,
@@ -95,6 +99,35 @@ impl Config {
         }
     }
 
+    /// Colours 1-8: the defaults, with any the config sets in their place.
+    pub fn palette_rgb(&self) -> [(u8, u8, u8); 8] {
+        let mut out = crate::editor::PALETTE;
+        for (slot, s) in out.iter_mut().zip(&self.palette) {
+            match parse_hex(s) {
+                Some(c) => *slot = c,
+                None => eprintln!("clipt: palette: '{s}' isn't a colour like \"#ef4444\"; using the default"),
+            }
+        }
+        out
+    }
+
+    /// Write `palette` into the config file, leaving the rest of it alone.
+    pub fn save_palette(palette: &[(u8, u8, u8); 8]) -> anyhow::Result<()> {
+        let p = Self::path();
+        let old = match std::fs::read_to_string(&p) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e.into()),
+        };
+        if let Some(dir) = p.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = p.with_extension("toml.new");
+        std::fs::write(&tmp, with_palette(&old, palette))?;
+        std::fs::rename(&tmp, &p)?;
+        Ok(())
+    }
+
     /// A fresh, non-clobbering path in `save_dir`.
     pub fn next_save_path(&self) -> PathBuf {
         fresh_path(&expand(&self.save_dir), &self.filename, "png")
@@ -104,6 +137,55 @@ impl Config {
     pub fn next_video_path(&self, ext: &str) -> PathBuf {
         fresh_path(&expand(&self.video_dir), &self.video_filename, ext)
     }
+}
+
+pub fn hex((r, g, b): (u8, u8, u8)) -> String {
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+fn parse_hex(s: &str) -> Option<(u8, u8, u8)> {
+    let h = s.trim().strip_prefix('#')?;
+    if h.len() != 6 || !h.is_ascii() {
+        return None;
+    }
+    let n = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok();
+    Some((n(0)?, n(2)?, n(4)?))
+}
+
+/// `src` (a config file's text) with its `palette = [...]` replaced, or one
+/// added at the end. Only that line, or those lines for an array split
+/// over several, change; comments and the other keys stay as they are.
+fn with_palette(src: &str, palette: &[(u8, u8, u8); 8]) -> String {
+    let line = format!("palette = [{}]", palette.iter().map(|&c| format!("\"{}\"", hex(c))).collect::<Vec<_>>().join(", "));
+    let mut out = Vec::new();
+    let mut lines = src.lines();
+    let mut done = false;
+    while let Some(l) = lines.next() {
+        let key = l.trim_start();
+        if !done && key.strip_prefix("palette").is_some_and(|r| r.trim_start().starts_with('=')) {
+            // Skip the rest of an array written over several lines.
+            let mut cur = l;
+            while !cur.contains(']') {
+                match lines.next() {
+                    Some(n) => cur = n,
+                    None => break,
+                }
+            }
+            out.push(line.clone());
+            done = true;
+        } else if !done && key.starts_with('[') {
+            // A table starts: top-level keys must come before it.
+            out.push(line.clone());
+            out.push(l.to_string());
+            done = true;
+        } else {
+            out.push(l.to_string());
+        }
+    }
+    if !done {
+        out.push(line);
+    }
+    out.join("\n") + "\n"
 }
 
 fn fresh_path(dir: &std::path::Path, pattern: &str, ext: &str) -> PathBuf {
@@ -138,5 +220,32 @@ fn strftime(fmt: &str) -> String {
         let mut buf = [0u8; 256];
         let n = libc::strftime(buf.as_mut_ptr().cast(), buf.len(), cfmt.as_ptr(), &tm);
         String::from_utf8_lossy(&buf[..n]).into_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn palette_round_trips_through_the_file() {
+        let pal = crate::editor::PALETTE;
+        let mut new = pal;
+        new[0] = (1, 2, 3);
+        let src = "# mine\ncolor = 2\npalette = [\n  \"#ff0000\",\n]\nwidth = 5\n";
+        let out = with_palette(src, &new);
+        assert!(out.starts_with("# mine\ncolor = 2\npalette = [\"#010203\", "), "{out}");
+        assert!(out.ends_with("]\nwidth = 5\n"), "the other keys stay: {out}");
+        let cfg: Config = toml::from_str(&out).unwrap();
+        assert_eq!(cfg.palette_rgb(), new);
+        assert_eq!(cfg.color, 2);
+
+        let out = with_palette("width = 5\n", &pal);
+        let cfg: Config = toml::from_str(&out).unwrap();
+        assert_eq!((cfg.palette_rgb(), cfg.width), (pal, 5.0), "added when missing: {out}");
+
+        let cfg: Config = toml::from_str("palette = [\"#00ff00\", \"nope\"]").unwrap();
+        let rgb = cfg.palette_rgb();
+        assert_eq!((rgb[0], rgb[1], rgb[2]), ((0, 255, 0), pal[1], pal[2]), "bad and missing entries keep the default");
     }
 }

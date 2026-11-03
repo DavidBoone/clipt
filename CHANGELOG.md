@@ -7,11 +7,32 @@ All notable changes are listed here. The format follows
 ## [Unreleased]
 
 ### Added
+- macOS: a menu bar icon, which opening clipt.app starts, with the Linux
+  tray's screenshot actions and Open at Login (macOS 13+), and global
+  shortcuts that need no Accessibility permission: ⌘⇧2 captures a region
+  (`hotkey` in the config, "" for none) and `hotkey_full` copies the whole
+  desktop.
+- A colour wheel for the editor's colours: right-click one of the eight in
+  the toolbar to change it. The new colours are kept in the config as
+  `palette`, which can also be set by hand.
+- Shapes can be changed after they're drawn: with the select tool (V),
+  click one to pick it, then drag it or its handles, choose a colour or
+  width to restyle it, or press Delete. Double-click text, or click it with
+  the text tool, to edit it. Undo steps back through all of it.
 - macOS: `clipt.app`, in each release as `clipt-vX.Y.Z-macos-app.zip`,
   signed, notarised and stapled. macOS keeps its Screen Recording
   permission under clipt rather than the terminal that started it, and it
   can go in Applications and Login Items. `clipt update` leaves it alone:
   a new version comes from the release page.
+
+### Fixed
+- Pixelating over a shape made the shape vanish: the blocks came from the
+  screenshot alone. They now blur whatever is underneath, drawings included.
+- Text landed half a line below the click. It's now centred on the click,
+  where the text pointer points; a faint cursor at the text's size and
+  colour shows where it will go before clicking, and while typing the
+  cursor has a contrasting edge and the text a faint box, so both show on
+  any background.
 
 ## [0.6.0] - 2026-11-03
 

@@ -3,7 +3,7 @@
 //! so the chrome stays crisp on HiDPI screens.
 
 use super::shapes::{Pt, RectExt, Shape, Tool, View};
-use super::{Editor, PALETTE};
+use super::{Editor, PALETTE, hsv_to_rgb};
 use crate::text;
 use tiny_skia::{Color, FillRule, LineCap, Path, PathBuilder, PixmapMut, Rect, Stroke, Transform};
 
@@ -265,7 +265,16 @@ pub fn dynamic_layers(ed: &Editor, frame: u64) -> Vec<Layer> {
     };
     let tk = rect_key(tb);
     let rects = tb.and_then(|panel| Rect::from_ltrb(panel.left() - 80.0, panel.top() - 40.0, panel.right() + 80.0, panel.bottom() + 40.0));
-    layers.push(Layer { key: key(&[tk[0], tk[1], tk[2], tk[3], hk, ed.tool as u8 as f32, ed.color as f32]), rects: grow(vec![rects]) });
+    let mut parts = vec![tk[0], tk[1], tk[2], tk[3], hk, ed.tool as u8 as f32, ed.color as f32];
+    parts.extend(ed.palette.iter().map(|&(r, g, b)| u32::from_be_bytes([0, r, g, b]) as f32));
+    layers.push(Layer { key: key(&parts), rects: grow(vec![rects]) });
+
+    // colour picker
+    let (k, r) = match (ed.picker, picker_layout(ed)) {
+        (Some(pk), Some(l)) => (key(&[pk.slot as f32, pk.h, pk.s, pk.v, l.panel.left(), l.panel.top()]), inflate(l.panel, CARD_SHADOW)),
+        _ => (0, None),
+    };
+    layers.push(Layer { key: k, rects: grow(vec![r]) });
 
     // stroke width hint
     let rects = if ed.width_hint { vec![Rect::from_xywh(p.0, p.1, 140.0, 60.0)] } else { Vec::new() };
@@ -278,10 +287,34 @@ pub fn dynamic_layers(ed: &Editor, frame: u64) -> Vec<Layer> {
     // text being typed
     let (k, r) = match &ed.text {
         Some(te) => {
-            let shape = Shape::Text { pos: te.pos, text: format!("{}MM", te.text), color: Color::BLACK, size: ed.text_size() };
-            let mut parts = vec![te.pos.0, te.pos.1, ed.text_size(), ed.color as f32];
+            let shape = Shape::Text { pos: te.pos, text: format!("{}MM", te.text), color: Color::BLACK, size: te.size };
+            let c = te.color;
+            let mut parts = vec![te.pos.0, te.pos.1, te.size, c.red(), c.green(), c.blue()];
             parts.extend(te.text.chars().map(|c| c as u32 as f32));
             (key(&parts), shape.bounds(&ed.fonts))
+        }
+        None => (0, None),
+    };
+    layers.push(Layer { key: k, rects: grow(vec![r]) });
+
+    // the picked shape's outline and handles
+    let (k, rects) = match ed.selected_shape().and_then(|s| Some((s.bounds(&ed.fonts)?, s.grips()))) {
+        Some((b, grips)) => {
+            let mut parts = rect_key(Some(b)).to_vec();
+            parts.extend(grips.iter().flat_map(|(_, p)| [p.0, p.1]));
+            let mut rects = vec![Some(b)];
+            rects.extend(grips.iter().map(|(_, p)| Rect::from_xywh(p.0 - 6.0, p.1 - 6.0, 12.0, 12.0)));
+            (key(&parts), rects)
+        }
+        None => (0, Vec::new()),
+    };
+    layers.push(Layer { key: k, rects: grow(rects) });
+
+    // where a click would start text
+    let (k, r) = match ed.text_ghost() {
+        Some(p) => {
+            let lh = text::line_height(ed.fonts.bold(), ed.text_size());
+            (key(&[p.0, p.1, ed.text_size(), ed.color as f32]), Rect::from_xywh(p.0 - 2.0, p.1 - lh / 2.0 - 2.0, 6.0, lh + 4.0))
         }
         None => (0, None),
     };
@@ -298,53 +331,42 @@ pub fn render(ed: &Editor, idx: usize, pm: &mut PixmapMut, origin: (i32, i32)) {
     let s = sv.scale;
     let view = View { off: (origin.0 as f32, origin.1 as f32), ..sv };
     let bounds = scr.bounds();
-
-    // Background: dimmed everywhere, clean inside the selection.
-    {
-        let (pw, ph) = (pm.width() as usize, pm.height() as usize);
-        let (bw, bh) = (scr.bg.width() as usize, scr.bg.height() as usize);
-        let (ox, oy) = (origin.0.max(0) as usize, origin.1.max(0) as usize);
-        let cols = pw.min(bw.saturating_sub(ox));
-        let sel_px = ed.lit().and_then(|r| r.intersect(&bounds)).map(|sel| {
-            let (x0, y0) = sv.px((sel.left(), sel.top()));
-            let (x1, y1) = sv.px((sel.right(), sel.bottom()));
-            (x0.round().max(0.0) as usize, y0.round().max(0.0) as usize, x1.round().max(0.0) as usize, y1.round().max(0.0) as usize)
-        });
-        let src = scr.bg.data();
-        let dst = pm.data_mut();
-        for y in 0..ph.min(bh.saturating_sub(oy)) {
-            let sy = oy + y;
-            let srow = &src[(sy * bw + ox) * 4..(sy * bw + ox + cols) * 4];
-            let drow = &mut dst[y * pw * 4..(y * pw + cols) * 4];
-            match sel_px {
-                Some((x0, y0, x1, y1)) if sy >= y0 && sy < y1 => {
-                    // [dim | clean | dim], in this pixmap's columns
-                    let a = x0.saturating_sub(ox).min(cols);
-                    let b = x1.saturating_sub(ox).min(cols);
-                    dim_copy(&mut drow[..a * 4], &srow[..a * 4]);
-                    drow[a * 4..b * 4].copy_from_slice(&srow[a * 4..b * 4]);
-                    dim_copy(&mut drow[b * 4..], &srow[b * 4..]);
-                }
-                _ => dim_copy(drow, srow),
-            }
-        }
-    }
+    background(ed, idx, pm, origin);
 
     // Record mode records the live screen, so annotations aren't shown.
-    for shape in ed.shapes.iter().chain(ed.in_progress()).filter(|_| !ed.record) {
-        shape.draw(pm, &view, Some((scr.bg.as_ref(), origin)), &ed.fonts);
+    if !ed.record {
+        let shapes: Vec<&Shape> = ed.shapes.iter().chain(ed.in_progress()).collect();
+        let size = (scr.bg.width() as i32, scr.bg.height() as i32);
+        let fill = |pm: &mut PixmapMut, at: (i32, i32)| background(ed, idx, pm, at);
+        super::shapes::draw_all(pm, &view, size, &shapes, &ed.fonts, &fill);
     }
     if let Some(te) = &ed.text {
-        let size = ed.text_size();
-        let shape = Shape::Text { pos: te.pos, text: te.text.clone(), color: ed.current_color(), size };
-        shape.draw(pm, &view, None, &ed.fonts);
+        let size = te.size;
+        let shape = Shape::Text { pos: te.pos, text: te.text.clone(), color: te.color, size };
+        shape.draw(pm, &view, &ed.fonts);
         // caret after the last line
         let last = te.text.rsplit('\n').next().unwrap_or("");
         let lines = te.text.matches('\n').count() as f32;
         let lh = text::line_height(ed.fonts.bold(), size * s) / s;
         let cx = te.pos.0 + text::measure(ed.fonts.bold(), size * s, last) / s + 1.0;
         let cy = te.pos.1 + lines * lh;
-        fill_rect(pm, &view, Rect::from_xywh(cx, cy, 2.0, lh), ed.current_color());
+        // A faint box shows what's being typed, and where.
+        let w = te.text.split('\n').map(|l| text::measure(ed.fonts.bold(), size * s, l) / s).fold(0.0, f32::max);
+        if let Some(r) = Rect::from_xywh(te.pos.0 - 5.0, te.pos.1 - 3.0, w + 12.0, (lines + 1.0) * lh + 6.0) {
+            let path = rounded(&view, r, 4.0);
+            let id = Transform::identity();
+            let st = |w: f32| Stroke { width: w * s, ..Default::default() };
+            pm.stroke_path(&path, &view.paint(Color::from_rgba8(0, 0, 0, 90)), &st(3.0), id, None);
+            pm.stroke_path(&path, &view.paint(Color::from_rgba8(255, 255, 255, 170)), &st(1.0), id, None);
+        }
+        text_cursor(pm, &view, (cx, cy), lh, te.color, 1.0);
+    }
+    if let Some(shape) = ed.selected_shape() {
+        draw_picked(pm, &view, shape, &ed.fonts);
+    }
+    if let Some(p) = ed.text_ghost() {
+        let lh = text::line_height(ed.fonts.bold(), ed.text_size() * s) / s;
+        text_cursor(pm, &view, (p.0, p.1 - lh / 2.0), lh, ed.current_color(), 0.55);
     }
 
     if let Some(sel) = ed.sel {
@@ -369,6 +391,7 @@ pub fn render(ed: &Editor, idx: usize, pm: &mut PixmapMut, origin: (i32, i32)) {
     {
         draw_toolbar(ed, pm, &view, panel, &btns);
     }
+    draw_picker(ed, pm, &view);
 
     if ed.width_hint && bounds.contains(ed.pointer.0, ed.pointer.1) {
         let t = format!("{} px", ed.width as u32);
@@ -377,6 +400,77 @@ pub fn render(ed: &Editor, idx: usize, pm: &mut PixmapMut, origin: (i32, i32)) {
         pill(pm, &view, r, 13.0);
         label(ed, pm, &view, (r.left() + 10.0, r.top() + 5.0), 13.0, &t, ICON(), false);
     }
+}
+
+/// The screenshot as the overlay shows it: dimmed everywhere, clean inside
+/// the selection. `pm`'s (0, 0) is screen pixel `origin`.
+fn background(ed: &Editor, idx: usize, pm: &mut PixmapMut, origin: (i32, i32)) {
+    let scr = &ed.screens[idx];
+    let sv = scr.view(ed.swap_rb);
+    let bounds = scr.bounds();
+    let (pw, ph) = (pm.width() as usize, pm.height() as usize);
+    let (bw, bh) = (scr.bg.width() as usize, scr.bg.height() as usize);
+    let (ox, oy) = (origin.0.max(0) as usize, origin.1.max(0) as usize);
+    let cols = pw.min(bw.saturating_sub(ox));
+    let sel_px = ed.lit().and_then(|r| r.intersect(&bounds)).map(|sel| {
+        let (x0, y0) = sv.px((sel.left(), sel.top()));
+        let (x1, y1) = sv.px((sel.right(), sel.bottom()));
+        (x0.round().max(0.0) as usize, y0.round().max(0.0) as usize, x1.round().max(0.0) as usize, y1.round().max(0.0) as usize)
+    });
+    let src = scr.bg.data();
+    let dst = pm.data_mut();
+    for y in 0..ph.min(bh.saturating_sub(oy)) {
+        let sy = oy + y;
+        let srow = &src[(sy * bw + ox) * 4..(sy * bw + ox + cols) * 4];
+        let drow = &mut dst[y * pw * 4..(y * pw + cols) * 4];
+        match sel_px {
+            Some((x0, y0, x1, y1)) if sy >= y0 && sy < y1 => {
+                // [dim | clean | dim], in this pixmap's columns
+                let a = x0.saturating_sub(ox).min(cols);
+                let b = x1.saturating_sub(ox).min(cols);
+                dim_copy(&mut drow[..a * 4], &srow[..a * 4]);
+                drow[a * 4..b * 4].copy_from_slice(&srow[a * 4..b * 4]);
+                dim_copy(&mut drow[b * 4..], &srow[b * 4..]);
+            }
+            _ => dim_copy(drow, srow),
+        }
+    }
+}
+
+/// The picked shape: a dashed box around it, and its handles.
+fn draw_picked(pm: &mut PixmapMut, view: &View, shape: &Shape, fonts: &crate::text::Fonts) {
+    let s = view.scale;
+    let id = Transform::identity();
+    if let Some(b) = shape.bounds(fonts) {
+        let (a, c) = (view.px((b.left(), b.top())), view.px((b.right(), b.bottom())));
+        if let Some(r) = Rect::from_ltrb(a.0, a.1, c.0, c.1) {
+            let path = PathBuilder::from_rect(r);
+            pm.stroke_path(&path, &view.paint(Color::from_rgba8(0, 0, 0, 110)), &Stroke { width: 3.0 * s, ..Default::default() }, id, None);
+            let dash = tiny_skia::StrokeDash::new(vec![5.0 * s, 4.0 * s], 0.0);
+            let st = Stroke { width: (1.5 * s).max(1.0), dash, ..Default::default() };
+            pm.stroke_path(&path, &view.paint(ACCENT()), &st, id, None);
+        }
+    }
+    for (_, p) in shape.grips() {
+        let Some(r) = Rect::from_xywh(p.0 - 4.5, p.1 - 4.5, 9.0, 9.0) else { continue };
+        let path = rounded(view, r, 2.0);
+        pm.fill_path(&path, &view.paint(Color::WHITE), FillRule::Winding, id, None);
+        pm.stroke_path(&path, &view.paint(ACCENT()), &Stroke { width: (1.5 * s).max(1.0), ..Default::default() }, id, None);
+    }
+}
+
+/// A text cursor `h` tall with its top at `p`, edged in black or white,
+/// whichever stands out from its colour, so it shows on any background.
+fn text_cursor(pm: &mut PixmapMut, view: &View, p: Pt, h: f32, c: Color, alpha: f32) {
+    let edge = if super::shapes::luminance(c) > 0.5 {
+        Color::from_rgba(0.0, 0.0, 0.0, 0.7 * alpha)
+    } else {
+        Color::from_rgba(1.0, 1.0, 1.0, 0.85 * alpha)
+    };
+    let mut c = c;
+    c.set_alpha(alpha);
+    fill_rect(pm, view, Rect::from_xywh(p.0 - 1.0, p.1 - 1.0, 4.0, h + 2.0), edge.unwrap_or(Color::BLACK));
+    fill_rect(pm, view, Rect::from_xywh(p.0, p.1, 2.0, h), c);
 }
 
 fn draw_selection(ed: &Editor, pm: &mut PixmapMut, view: &View, sel: Rect) {
@@ -718,7 +812,7 @@ fn draw_toolbar(ed: &Editor, pm: &mut PixmapMut, view: &View, panel: Rect, btns:
     for &(r, b) in btns {
         match b {
             Button::Color(i) => {
-                let (cr, cg, cb) = PALETTE[i];
+                let (cr, cg, cb) = ed.palette[i];
                 let c = Color::from_rgba8(cr, cg, cb, 255);
                 let (cx, cy) = (r.left() + r.width() / 2.0, r.top() + r.height() / 2.0);
                 let rad = if ed.color == i { 8.0 } else { 6.5 };
@@ -778,10 +872,141 @@ fn draw_toolbar(ed: &Editor, pm: &mut PixmapMut, view: &View, panel: Rect, btns:
     }
 }
 
+// ---- colour picker -----------------------------------------------------------
+
+/// What a press in the colour picker adjusts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerPart {
+    /// Hue around the wheel, saturation out from its middle.
+    Wheel,
+    /// Brightness, along the slider.
+    Value,
+    /// The rest of the panel: holds the click, changes nothing.
+    Panel,
+}
+
+pub struct PickerLayout {
+    pub panel: Rect,
+    pub center: Pt,
+    pub radius: f32,
+    pub slider: Rect,
+    /// The swatch and hex code.
+    pub footer: Rect,
+}
+
+const WHEEL_R: f32 = 72.0;
+const PICK_PAD: f32 = 14.0;
+
+/// The picker's panel, over the colour it changes: above the toolbar, or
+/// below it when there's no room.
+pub fn picker_layout(ed: &Editor) -> Option<PickerLayout> {
+    let pk = ed.picker?;
+    let (bar, btns) = toolbar_layout(ed)?;
+    let (dot, _) = btns.iter().find(|(_, b)| *b == Button::Color(pk.slot))?;
+    let w = WHEEL_R * 2.0 + PICK_PAD * 2.0;
+    let h = PICK_PAD + WHEEL_R * 2.0 + 14.0 + 14.0 + 12.0 + 24.0 + PICK_PAD;
+    let scr = ed.screens.iter().map(|s| s.bounds()).find(|b| b.contains(dot.left(), dot.top())).unwrap_or_else(|| ed.desktop());
+    let x = (dot.left() + dot.width() / 2.0 - w / 2.0).clamp(scr.left() + 6.0, (scr.right() - w - 6.0).max(scr.left() + 6.0));
+    let y = if bar.top() - 10.0 - h >= scr.top() + 6.0 { bar.top() - 10.0 - h } else { bar.bottom() + 10.0 };
+    let panel = Rect::from_xywh(x, y, w, h)?;
+    let center = (x + w / 2.0, y + PICK_PAD + WHEEL_R);
+    let slider = Rect::from_xywh(x + PICK_PAD, y + PICK_PAD + WHEEL_R * 2.0 + 14.0, w - PICK_PAD * 2.0, 14.0)?;
+    let footer = Rect::from_xywh(x + PICK_PAD, slider.bottom() + 12.0, w - PICK_PAD * 2.0, 24.0)?;
+    Some(PickerLayout { panel, center, radius: WHEEL_R, slider, footer })
+}
+
+/// What the picker would adjust at `p`: `None` outside its panel.
+pub fn picker_hit(ed: &Editor, p: Pt) -> Option<PickerPart> {
+    let l = picker_layout(ed)?;
+    if !l.panel.contains(p.0, p.1) {
+        return None;
+    }
+    let d = (p.0 - l.center.0).hypot(p.1 - l.center.1);
+    if d <= l.radius + 4.0 {
+        Some(PickerPart::Wheel)
+    } else if inflate(l.slider, 6.0).is_some_and(|r| r.contains(p.0, p.1)) {
+        Some(PickerPart::Value)
+    } else {
+        Some(PickerPart::Panel)
+    }
+}
+
+/// Fill `pm` pixel by pixel inside logical rect `r`, with `f` giving each
+/// pixel's colour and coverage from its logical centre.
+fn shade(pm: &mut PixmapMut, view: &View, r: Rect, f: impl Fn(Pt) -> Option<((u8, u8, u8), f32)>) {
+    let s = view.scale;
+    let (a, b) = (view.px((r.left(), r.top())), view.px((r.right(), r.bottom())));
+    let (w, h) = (pm.width() as i32, pm.height() as i32);
+    let (x0, y0) = ((a.0.floor() as i32).max(0), (a.1.floor() as i32).max(0));
+    let (x1, y1) = ((b.0.ceil() as i32).min(w), (b.1.ceil() as i32).min(h));
+    let stride = w as usize * 4;
+    let d = pm.data_mut();
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let lp = ((x as f32 + 0.5 + view.off.0) / s + view.ox, (y as f32 + 0.5 + view.off.1) / s + view.oy);
+            let Some(((r, g, b), cov)) = f(lp) else { continue };
+            if cov <= 0.0 {
+                continue;
+            }
+            let (r, b) = if view.swap_rb { (b, r) } else { (r, b) };
+            let i = y as usize * stride + x as usize * 4;
+            let mix = |dst: u8, src: u8| (src as f32 * cov + dst as f32 * (1.0 - cov)).round() as u8;
+            d[i] = mix(d[i], r);
+            d[i + 1] = mix(d[i + 1], g);
+            d[i + 2] = mix(d[i + 2], b);
+            d[i + 3] = mix(d[i + 3], 255);
+        }
+    }
+}
+
+fn draw_picker(ed: &Editor, pm: &mut PixmapMut, view: &View) {
+    let (Some(pk), Some(l)) = (ed.picker, picker_layout(ed)) else { return };
+    let s = view.scale;
+    card(pm, view, l.panel, 14.0);
+    // The wheel: hue around, saturation outward, at the slider's brightness.
+    let (c, rad) = (l.center, l.radius);
+    if let Some(r) = Rect::from_xywh(c.0 - rad - 1.0, c.1 - rad - 1.0, rad * 2.0 + 2.0, rad * 2.0 + 2.0) {
+        shade(pm, view, r, |p| {
+            let (dx, dy) = (p.0 - c.0, p.1 - c.1);
+            let d = dx.hypot(dy);
+            let cov = ((rad - d) * s + 0.5).clamp(0.0, 1.0);
+            Some((hsv_to_rgb(dy.atan2(dx).to_degrees(), (d / rad).min(1.0), pk.v), cov))
+        });
+    }
+    let ring = |pm: &mut PixmapMut, at: Pt| {
+        circle(pm, view, at, 7.0, None, Some((Color::from_rgba8(0, 0, 0, 120), 3.5)));
+        circle(pm, view, at, 7.0, None, Some((Color::WHITE, 2.0)));
+    };
+    let a = pk.h.to_radians();
+    ring(pm, (c.0 + a.cos() * pk.s * rad, c.1 + a.sin() * pk.s * rad));
+    // The slider: from black to the full-brightness colour.
+    let sl = l.slider;
+    shade(pm, view, sl, |p| Some((hsv_to_rgb(pk.h, pk.s, ((p.0 - sl.left()) / sl.width()).clamp(0.0, 1.0)), 1.0)));
+    stroke_rect(pm, view, sl, Color::from_rgba8(255, 255, 255, 60), 1.0);
+    ring(pm, (sl.left() + pk.v * sl.width(), sl.top() + sl.height() / 2.0));
+    // The colour and its hex code.
+    let (r, g, b) = hsv_to_rgb(pk.h, pk.s, pk.v);
+    let f = l.footer;
+    if let Some(sw) = Rect::from_xywh(f.left(), f.top(), 36.0, f.height()) {
+        let path = rounded(view, sw, 6.0);
+        pm.fill_path(&path, &view.paint(Color::from_rgba8(r, g, b, 255)), FillRule::Winding, Transform::identity(), None);
+        pm.stroke_path(
+            &path,
+            &view.paint(Color::from_rgba8(255, 255, 255, 60)),
+            &Stroke { width: s, ..Default::default() },
+            Transform::identity(),
+            None,
+        );
+    }
+    let th = text::line_height(&ed.fonts.regular, 13.0 * s) / s;
+    let y = f.top() + (f.height() - th) / 2.0;
+    label(ed, pm, view, (f.left() + 46.0, y), 13.0, &format!("#{r:02X}{g:02X}{b:02X}"), ICON(), false);
+}
+
 fn tooltip(ed: &Editor, b: Button) -> String {
     let on = |v: bool| if v { "on" } else { "off" };
     let name = |t: Tool| match t {
-        Tool::Select => "Select",
+        Tool::Select => "Select and move",
         Tool::Rect => "Rectangle",
         Tool::Ellipse => "Ellipse",
         Tool::Arrow => "Arrow",
@@ -794,7 +1019,7 @@ fn tooltip(ed: &Editor, b: Button) -> String {
     };
     match b {
         Button::Tool(t) => format!("{}  {}", name(t), t.hotkey().to_ascii_uppercase()),
-        Button::Color(i) => format!("Colour  {}", i + 1),
+        Button::Color(i) => format!("Colour  {}   ·   right-click to change", i + 1),
         Button::Undo => "Undo  Ctrl+Z".into(),
         Button::Redo => "Redo  Ctrl+Shift+Z".into(),
         Button::Save => "Save  Ctrl+S".into(),

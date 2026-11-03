@@ -396,6 +396,7 @@ fn key(ev: &NSEvent) -> Option<Key> {
         53 => Key::Escape,
         36 | 76 => Key::Enter,
         51 => Key::Backspace,
+        117 => Key::Delete,
         123 => Key::Left,
         124 => Key::Right,
         125 => Key::Down,

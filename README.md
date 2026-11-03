@@ -113,9 +113,12 @@ clipt gnome-extension    # install and enable it; log out and back in once
 ```
 
 Editor: drag to select (click = the highlighted window or screen), drag handles to resize, drag
-inside to move. Tools: **V** select, **R** rectangle, **E** ellipse, **A**
+inside to move. With **V**, click a shape to pick it: drag it or its
+handles, press a colour or change the width to restyle it, **Delete** to
+remove it; double-click text to edit it. Tools: **V** select, **R** rectangle, **E** ellipse, **A**
 arrow, **L** line, **P** pen, **M** highlighter, **T** text, **X** pixelate,
-**N** numbered counter. **1–8** colour, scroll or **[ ]** stroke width, Shift
+**N** numbered counter. **1–8** colour (right-click a colour to change it),
+scroll or **[ ]** stroke width, Shift
 for squares and 45° lines. **Enter**/**Ctrl+C**/double-click copies, **Ctrl+S**
 saves, **Ctrl+Z**/**Ctrl+Shift+Z** undo/redo, **Esc** cancels, right-click
 backs out a step.
@@ -148,6 +151,7 @@ something else is copied (Wayland clipboards are owned by a live client).
 save_dir = "~/Pictures/Screenshots"
 filename = "Screenshot_%Y-%m-%d_%H-%M-%S"   # strftime
 color = 1            # 1-8: red orange yellow green blue purple white black
+# palette = ["#ef4444", "#f97316", "#eab308", "#22c55e", "#3b82f6", "#a855f7", "#ffffff", "#111111"]
 width = 4
 copy_on_save = true
 notify = true
@@ -199,10 +203,13 @@ gdbus call --session --dest org.freedesktop.impl.portal.PermissionStore \
 
 ### macOS (preview)
 
-Screenshots work on macOS (recording and the menu bar icon don't yet), and
-have been tried on one Mac so far. Each release has `clipt.app`
+Screenshots and the menu bar icon work on macOS (recording doesn't yet),
+and have been tried on one Mac so far. Each release has `clipt.app`
 (`clipt-vX.Y.Z-macos-app.zip`; drag it to Applications, and macOS asks once
-to let clipt record the screen) and a universal binary for the command line,
+to let clipt record the screen). Opening it puts clipt in the menu bar,
+with **⌘⇧2** to capture a region from anywhere (`hotkey` in the config;
+`hotkey_full` adds one for the whole desktop). There's also a universal
+binary for the command line,
 `clipt-vX.Y.Z-universal-macos.tar.gz`, both signed with a Developer ID and
 notarised by Apple. Put the binary somewhere on your `PATH`, and
 `clipt update` keeps it current:

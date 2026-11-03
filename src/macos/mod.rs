@@ -42,7 +42,7 @@ EDITOR KEYS:
     Return, ⌘C, dbl-click copy            ⌘S             save
     ⌘Z / ⌘⇧Z              undo / redo     Esc / right-click  cancel / back
 
-Config: ~/.config/clipt/config.toml (save_dir, filename, color, width,
+Config: ~/.config/clipt/config.toml (save_dir, filename, color, palette, width,
 copy_on_save, notify, cursor, font, hotkey, hotkey_full). hotkey is the
 tray's shortcut for a region, default \"cmd+shift+2\"; \"\" turns it off.
 clipt needs the Screen Recording permission (System Settings > Privacy &
@@ -131,9 +131,15 @@ pub fn run(args: Args, cfg: Config) -> Result<()> {
     let fonts = fonts.join().map_err(|_| anyhow::anyhow!("font loader panicked"))??;
     let mut ed = Editor::new(shots, fonts, true, cfg.color.saturating_sub(1), cfg.width);
     ed.windows = wins.join().unwrap_or_default();
+    ed.palette = cfg.palette_rgb();
 
     let mut session = overlay::Session::new(ed, mtm)?;
     let outcome = session.run()?;
+    if session.editor().palette_changed
+        && let Err(e) = Config::save_palette(&session.editor().palette)
+    {
+        eprintln!("clipt: saving the palette: {e:#}");
+    }
     if outcome == Outcome::Cancel {
         return Ok(());
     }

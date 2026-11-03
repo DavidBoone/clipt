@@ -437,6 +437,7 @@ fn map_key(ev: &KeyEvent, ctrl: bool) -> Option<Key> {
         Keysym::Escape => Key::Escape,
         Keysym::Return | Keysym::KP_Enter => Key::Enter,
         Keysym::BackSpace => Key::Backspace,
+        Keysym::Delete | Keysym::KP_Delete => Key::Delete,
         Keysym::Left => Key::Left,
         Keysym::Right => Key::Right,
         Keysym::Up => Key::Up,

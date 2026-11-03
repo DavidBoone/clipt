@@ -104,7 +104,7 @@ EDITOR KEYS:
                           Screenshot / Video at the bottom of the screen)
     S / M (record mode)   computer sound / microphone on or off
 
-Config: ~/.config/clipt/config.toml (save_dir, filename, color, width,
+Config: ~/.config/clipt/config.toml (save_dir, filename, color, palette, width,
 copy_on_save, notify, backend, cursor, font, video_dir, video_filename,
 record_fps, record_codec, record_format, record_audio,
 record_audio_balance, record_separate_audio, max_duration).
@@ -413,6 +413,7 @@ fn run() -> Result<()> {
             let (_, shots) = cap.capture(&outputs, cursor, backend)?;
             let fonts = fonts.join().map_err(|_| anyhow::anyhow!("font loader panicked"))??;
             let mut ed = Editor::new(shots, fonts, false, cfg.color.saturating_sub(1), cfg.width);
+            ed.palette = cfg.palette_rgb();
             ed.windows = windows::list(cap.kind() == capture::DisplayKind::X11);
             // As the screenshot overlay shows it; CLIPT_RECORD=1 in record mode.
             ed.can_switch = true;
@@ -441,6 +442,7 @@ fn gui(cfg: &Config, args: &Args, mut ed: Editor, kind: capture::DisplayKind, ba
     // It can switch to recording the selection (Ctrl+R, or its buttons),
     // with the sound the settings would record.
     ed.can_switch = true;
+    ed.palette = cfg.palette_rgb();
     let audio = record::audio::Source::parse(args.audio.as_deref().unwrap_or(&cfg.record_audio)).unwrap_or_default();
     let (system, mic) = record::audio::Source::toggles(&audio);
     ed.sound = editor::SoundToggles { system, mic };
@@ -448,6 +450,11 @@ fn gui(cfg: &Config, args: &Args, mut ed: Editor, kind: capture::DisplayKind, ba
     let mut session = session::open(ed, kind)?;
     lap("surfaces");
     let outcome = session.run()?;
+    if session.editor().palette_changed
+        && let Err(e) = Config::save_palette(&session.editor().palette)
+    {
+        eprintln!("clipt: saving the palette: {e:#}");
+    }
     if outcome == Outcome::Cancel {
         return Ok(());
     }
