@@ -132,8 +132,9 @@ press **Ctrl+R**), select, toggle sound with **S** and the microphone with
 `clipt tray` puts an icon in the system tray (StatusNotifierItem: KDE, waybar,
 GNOME with the AppIndicator extension, Xfce, …). Left-click captures a region,
 middle-click copies the whole desktop, and the right-click menu adds a 3-second
-delay, the screenshots folder and Quit. Each capture runs as a fresh `clipt`
-process, so the tray itself stays idle.
+delay, recording, the folders, ticks for *Record as GIF*, *Copy when saving*
+and *Notifications*, *Settings…* (opens the config file) and Quit. Each
+capture runs as a fresh `clipt` process, so the tray itself stays idle.
 
 **Updates:** `clipt update` (or *Check for updates…* in the tray menu)
 asks GitHub for the latest release. When clipt was installed with

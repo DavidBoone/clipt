@@ -42,6 +42,11 @@ enum Action {
     RecordRegion,
     RecordScreen,
     ToggleSound,
+    /// The settings the menu ticks, kept in the config.
+    ToggleGif,
+    ToggleCopy,
+    ToggleNotify,
+    OpenSettings,
     PauseRecording,
     ResumeRecording,
     StopRecording,
@@ -60,12 +65,17 @@ const MENU: &[(i32, Option<(&str, Action)>)] = &[
     (20, Some(("Record region…", Action::RecordRegion))),
     (21, Some(("Record screen", Action::RecordScreen))),
     (27, Some(("Record sound", Action::ToggleSound))),
+    (28, Some(("Record as GIF", Action::ToggleGif))),
     (22, Some(("Pause recording", Action::PauseRecording))),
     (23, Some(("Resume recording", Action::ResumeRecording))),
     (24, Some(("Stop recording", Action::StopRecording))),
     (25, None),
     (5, Some(("Open screenshots folder", Action::OpenFolder))),
     (26, Some(("Open recordings folder", Action::OpenVideos))),
+    (29, None),
+    (30, Some(("Copy when saving", Action::ToggleCopy))),
+    (31, Some(("Notifications", Action::ToggleNotify))),
+    (32, Some(("Settings…", Action::OpenSettings))),
     (6, None),
     (7, Some(("Check for updates…", Action::CheckUpdates))),
     (8, Some(("Quit", Action::Quit))),
@@ -92,7 +102,7 @@ fn menu(rec: u8) -> impl Iterator<Item = &'static (i32, Option<(&'static str, Ac
     MENU.iter().filter(move |(id, _)| {
         let hidden = match id {
             6 | 7 => flatpak,
-            20 | 21 | 27 => rec != IDLE,
+            20 | 21 | 27 | 28 => rec != IDLE,
             22 => rec != RECORDING,
             23 => rec != PAUSED,
             24 => rec == IDLE,
@@ -113,6 +123,33 @@ static SOUND: AtomicBool = AtomicBool::new(false);
 static SOUND_CONFIGURED: AtomicBool = AtomicBool::new(false);
 /// The menu changed without the recording state changing (the checkbox).
 static MENU_DIRTY: AtomicBool = AtomicBool::new(false);
+
+/// Whether a ticked setting is on, from the config: `None` for items that
+/// aren't one.
+fn setting_on(a: Action, cfg: &crate::config::Config) -> Option<bool> {
+    match a {
+        Action::ToggleGif => Some(cfg.record_format == "gif"),
+        Action::ToggleCopy => Some(cfg.copy_on_save),
+        Action::ToggleNotify => Some(cfg.notify),
+        Action::ToggleSound => Some(SOUND.load(Ordering::SeqCst)),
+        _ => None,
+    }
+}
+
+/// Flip a ticked setting in the config file.
+fn toggle_setting(a: Action) {
+    let cfg = crate::config::Config::load().unwrap_or_default();
+    let on = !setting_on(a, &cfg).unwrap_or(false);
+    let (key, value) = match a {
+        Action::ToggleGif => ("record_format", if on { "gif" } else { "mp4" }),
+        Action::ToggleCopy => ("copy_on_save", if on { "true" } else { "false" }),
+        _ => ("notify", if on { "true" } else { "false" }),
+    };
+    if let Err(e) = crate::config::Config::set(key, value) {
+        eprintln!("clipt tray: {e:#}");
+    }
+    MENU_DIRTY.store(true, Ordering::SeqCst);
+}
 
 /// What a recording started from the tray passes for sound.
 fn sound_args() -> &'static [&'static str] {
@@ -143,6 +180,18 @@ fn run_action(a: Action, dirs: &Dirs) {
         Action::PauseRecording => Command::new(&exe).args(["record", "--pause"]).spawn(),
         Action::ResumeRecording => Command::new(&exe).args(["record", "--resume"]).spawn(),
         Action::StopRecording => Command::new(&exe).args(["record", "--stop"]).spawn(),
+        Action::ToggleGif | Action::ToggleCopy | Action::ToggleNotify => {
+            toggle_setting(a);
+            return;
+        }
+        Action::OpenSettings => {
+            let p = crate::config::Config::path();
+            if !p.exists() {
+                let _ = p.parent().map(std::fs::create_dir_all);
+                let _ = std::fs::write(&p, "# clipt's settings: `clipt config` lists them, `man clipt` explains them.\n");
+            }
+            Command::new("xdg-open").arg(&p).spawn()
+        }
         Action::OpenFolder => open(&dirs.save),
         Action::OpenVideos => open(&dirs.video),
         Action::CheckUpdates => {
@@ -375,14 +424,14 @@ fn owned(v: Variant<'_>) -> OwnedVariant {
     OwnedVariant::try_from(v).expect("no fds in menu properties")
 }
 
-fn item_props(entry: Option<(&str, Action)>) -> Props {
+fn item_props(entry: Option<(&str, Action)>, cfg: &crate::config::Config) -> Props {
     let mut p = Props::new();
     match entry {
         Some((label, a)) => {
             p.insert("label".into(), owned(Variant::from(label)));
-            if matches!(a, Action::ToggleSound) {
+            if let Some(on) = setting_on(a, cfg) {
                 p.insert("toggle-type".into(), owned(Variant::from("checkmark")));
-                p.insert("toggle-state".into(), owned(Variant::from(SOUND.load(Ordering::SeqCst) as i32)));
+                p.insert("toggle-state".into(), owned(Variant::from(on as i32)));
             }
         }
         None => {
@@ -398,6 +447,12 @@ fn root_props() -> Props {
     p
 }
 
+/// The config as it is now, for the menu's ticks; the defaults if it can't
+/// be read.
+fn settings() -> crate::config::Config {
+    crate::config::Config::load().unwrap_or_default()
+}
+
 fn child_layout(id: i32, props: Props) -> OwnedVariant {
     let children: Vec<Variant<'static>> = Vec::new();
     let s: Structure<'static> =
@@ -411,22 +466,26 @@ impl Menu {
     fn get_layout(&self, parent_id: i32, _recursion_depth: i32, _property_names: Vec<String>) -> (u32, (i32, Props, Vec<OwnedVariant>)) {
         let rev = MENU_REVISION.load(Ordering::SeqCst);
         let rec = self.rec.load(Ordering::SeqCst);
+        let cfg = settings();
         if parent_id != 0 {
-            let props = menu(rec).find(|(id, _)| *id == parent_id).map(|(_, e)| item_props(*e)).unwrap_or_default();
+            let props = menu(rec).find(|(id, _)| *id == parent_id).map(|(_, e)| item_props(*e, &cfg)).unwrap_or_default();
             return (rev, (parent_id, props, Vec::new()));
         }
-        let children = menu(rec).map(|(id, e)| child_layout(*id, item_props(*e))).collect();
+        let children = menu(rec).map(|(id, e)| child_layout(*id, item_props(*e, &cfg))).collect();
         (rev, (0, root_props(), children))
     }
 
     fn get_group_properties(&self, ids: Vec<i32>, _property_names: Vec<String>) -> Vec<(i32, Props)> {
         let rec = self.rec.load(Ordering::SeqCst);
-        menu(rec).filter(|(id, _)| ids.is_empty() || ids.contains(id)).map(|(id, e)| (*id, item_props(*e))).collect()
+        let cfg = settings();
+        menu(rec).filter(|(id, _)| ids.is_empty() || ids.contains(id)).map(|(id, e)| (*id, item_props(*e, &cfg))).collect()
     }
 
     fn get_property(&self, id: i32, name: &str) -> zbus::fdo::Result<OwnedVariant> {
         let rec = self.rec.load(Ordering::SeqCst);
-        let props = if id == 0 { root_props() } else { menu(rec).find(|(i, _)| *i == id).map(|(_, e)| item_props(*e)).unwrap_or_default() };
+        let cfg = settings();
+        let props =
+            if id == 0 { root_props() } else { menu(rec).find(|(i, _)| *i == id).map(|(_, e)| item_props(*e, &cfg)).unwrap_or_default() };
         props.get(name).map(|v| v.try_clone().expect("no fds")).ok_or_else(|| zbus::fdo::Error::InvalidArgs(name.into()))
     }
 
@@ -508,12 +567,19 @@ async fn register(conn: &Connection, name: &str) -> zbus::Result<()> {
 
 /// Follow the recording state (a pidfile, checked twice a second) and tell
 /// the tray host when it changes, so the icon, tooltip and menu follow; and
-/// the menu alone when the sound checkbox changes.
+/// the menu alone when a checkbox or the config file changes.
 fn watch_recording(conn: Connection, rec: Arc<AtomicU8>) {
+    let modified = || std::fs::metadata(crate::config::Config::path()).and_then(|m| m.modified()).ok();
+    let mut cfg_time = modified();
     loop {
         let now = rec_state();
         let state_changed = rec.swap(now, Ordering::SeqCst) != now;
-        if state_changed || MENU_DIRTY.swap(false, Ordering::SeqCst) {
+        // The settings the menu ticks can change elsewhere: `clipt config`,
+        // the overlay's GIF toggle, an editor.
+        let t = modified();
+        let cfg_changed = t != cfg_time;
+        cfg_time = t;
+        if state_changed || cfg_changed || MENU_DIRTY.swap(false, Ordering::SeqCst) {
             MENU_REVISION.fetch_add(1, Ordering::SeqCst);
             let rev = MENU_REVISION.load(Ordering::SeqCst);
             zbus::block_on(async {
@@ -647,8 +713,9 @@ mod tests {
     fn sound_checkbox() {
         assert!(labels(IDLE).contains(&"Record sound") && !labels(RECORDING).contains(&"Record sound"));
         let entry = MENU.iter().find(|(id, _)| *id == 27).unwrap().1;
-        let state = || i32::try_from(item_props(entry)["toggle-state"].try_clone().unwrap()).unwrap();
-        assert_eq!(<&str>::try_from(&*item_props(entry)["toggle-type"]).unwrap(), "checkmark");
+        let cfg = crate::config::Config::default();
+        let state = || i32::try_from(item_props(entry, &cfg)["toggle-state"].try_clone().unwrap()).unwrap();
+        assert_eq!(<&str>::try_from(&*item_props(entry, &cfg)["toggle-type"]).unwrap(), "checkmark");
         // Off: recordings say so, whatever the config says.
         SOUND.store(false, Ordering::SeqCst);
         assert_eq!((state(), sound_args()), (0, &["--no-audio"][..]));
@@ -660,5 +727,20 @@ mod tests {
         // On, with none configured: the computer's sound.
         SOUND_CONFIGURED.store(false, Ordering::SeqCst);
         assert_eq!(sound_args(), &["--audio"]);
+    }
+
+    /// The settings the menu ticks show the config's values.
+    #[test]
+    fn settings_checkboxes() {
+        let item = |id: i32| MENU.iter().find(|(i, _)| *i == id).unwrap().1;
+        let state =
+            |id: i32, cfg: &crate::config::Config| i32::try_from(item_props(item(id), cfg)["toggle-state"].try_clone().unwrap()).unwrap();
+        let mut cfg = crate::config::Config::default();
+        assert_eq!((state(28, &cfg), state(30, &cfg), state(31, &cfg)), (0, 1, 1));
+        cfg.record_format = "gif".into();
+        cfg.copy_on_save = false;
+        assert_eq!((state(28, &cfg), state(30, &cfg)), (1, 0));
+        assert!(!item_props(item(32), &cfg).contains_key("toggle-type"), "Settings… is a plain item");
+        assert!(labels(IDLE).contains(&"Record as GIF") && !labels(RECORDING).contains(&"Record as GIF"));
     }
 }

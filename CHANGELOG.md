@@ -14,6 +14,9 @@ All notable changes are listed here. The format follows
 - A GIF toggle in the Video toolbar (G): it starts from `record_format`,
   and flipping it saves `record_format`, so the next recording, from Print
   Screen, the tray or `clipt record`, follows it.
+- The tray menu ticks *Record as GIF*, *Copy when saving* and
+  *Notifications*, saved in the config, and *Settings…* opens the config
+  file. The macOS menu bar has the last three.
 
 ### Changed
 - The Copy button's tooltip shows Ctrl+C rather than Enter (both still copy).
