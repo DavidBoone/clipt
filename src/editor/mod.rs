@@ -12,6 +12,8 @@ use crate::text::Fonts;
 use shapes::{Pt, RectExt, Shape, Tool, View, norm_rect};
 use tiny_skia::{Color, FilterQuality, Pixmap, PixmapPaint, Rect, Transform};
 
+/// The colours 1-8 start as; `palette` in the config overrides them, and
+/// the colour picker changes them.
 pub const PALETTE: [(u8, u8, u8); 8] = [
     (0xef, 0x44, 0x44), // red
     (0xf9, 0x73, 0x16), // orange
@@ -22,6 +24,53 @@ pub const PALETTE: [(u8, u8, u8); 8] = [
     (0xff, 0xff, 0xff), // white
     (0x11, 0x11, 0x11), // black
 ];
+
+/// The colour picker, open on palette slot `slot`: hue in degrees,
+/// saturation and value 0-1.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Picker {
+    pub slot: usize,
+    pub h: f32,
+    pub s: f32,
+    pub v: f32,
+    /// The colour before picking, for Esc.
+    orig: (u8, u8, u8),
+    drag: Option<ui::PickerPart>,
+}
+
+/// HSV (hue in degrees, saturation and value 0-1) to 8-bit RGB.
+pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let h = h.rem_euclid(360.0) / 60.0;
+    let c = v * s;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    let to = |f: f32| ((f + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    (to(r), to(g), to(b))
+}
+
+pub fn rgb_to_hsv((r, g, b): (u8, u8, u8)) -> (f32, f32, f32) {
+    let (r, g, b) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+    let max = r.max(g).max(b);
+    let d = max - r.min(g).min(b);
+    let h = if d == 0.0 {
+        0.0
+    } else if max == r {
+        60.0 * ((g - b) / d).rem_euclid(6.0)
+    } else if max == g {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    (h, if max == 0.0 { 0.0 } else { d / max }, max)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -147,6 +196,11 @@ pub struct Editor {
     redo: Vec<Shape>,
     pub tool: Tool,
     pub color: usize,
+    /// Colours 1-8.
+    pub palette: [(u8, u8, u8); 8],
+    pub picker: Option<Picker>,
+    /// The picker changed a colour: the host saves the palette.
+    pub palette_changed: bool,
     pub width: f32,
     pub pointer: Pt,
     pub pointer_in: bool,
@@ -202,6 +256,9 @@ impl Editor {
             redo: Vec::new(),
             tool: Tool::Select,
             color: color.min(PALETTE.len() - 1),
+            palette: PALETTE,
+            picker: None,
+            palette_changed: false,
             width: width.clamp(1.0, 40.0),
             pointer: (0.0, 0.0),
             pointer_in: false,
@@ -274,7 +331,7 @@ impl Editor {
     }
 
     pub fn current_color(&self) -> Color {
-        let (r, g, b) = PALETTE[self.color];
+        let (r, g, b) = self.palette[self.color];
         Color::from_rgba8(r, g, b, 255)
     }
 
@@ -355,6 +412,11 @@ impl Editor {
         };
     }
 
+    #[cfg(test)]
+    fn drag_is_none(&self) -> bool {
+        matches!(self.drag, Drag::None)
+    }
+
     pub fn is_adjusting(&self) -> bool {
         matches!(self.drag, Drag::Creating { .. } | Drag::Moving { .. } | Drag::Resizing { .. })
     }
@@ -367,6 +429,7 @@ impl Editor {
             && self.pointer_in
             && !self.record
             && matches!(self.drag, Drag::None)
+            && self.picker.is_none()
             && ui::toolbar_hit(self, p).is_none()
             && ui::mode_switch_hit(self, p).is_none())
         .then_some(p)
@@ -420,7 +483,7 @@ impl Editor {
 
     pub fn cursor(&self) -> CursorKind {
         let p = self.pointer;
-        if ui::toolbar_hit(self, p).is_some() || ui::mode_switch_hit(self, p).is_some() {
+        if ui::toolbar_hit(self, p).is_some() || ui::mode_switch_hit(self, p).is_some() || ui::picker_hit(self, p).is_some() {
             return CursorKind::Pointer;
         }
         match &self.drag {
@@ -451,6 +514,10 @@ impl Editor {
         self.pointer = p;
         self.pointer_in = true;
         self.width_hint = false;
+        if let Some(part) = self.picker.and_then(|pk| pk.drag) {
+            self.pick(part, p);
+            return true;
+        }
         match &mut self.drag {
             Drag::None => {}
             Drag::Pending { start } => {
@@ -526,7 +593,24 @@ impl Editor {
 
     pub fn button_press(&mut self, p: Pt, left: bool, mods: Mods) -> bool {
         self.pointer = p;
+        if self.picker.is_some() {
+            if let Some(part) = ui::picker_hit(self, p).filter(|_| left) {
+                self.pick(part, p);
+                return true;
+            }
+            // A click anywhere else closes it, and does what it would do
+            // only on the toolbar.
+            self.close_picker(true);
+            if !left || ui::toolbar_hit(self, p).is_none() {
+                return true;
+            }
+        }
         if !left {
+            // Right-clicking a colour changes it.
+            if let Some(ui::Button::Color(i)) = ui::toolbar_hit(self, p) {
+                self.open_picker(i);
+                return true;
+            }
             // Right click backs out: in-progress drag, then text, then selection.
             if !matches!(self.drag, Drag::None) {
                 self.drag = Drag::None;
@@ -613,6 +697,11 @@ impl Editor {
             return false;
         }
         self.pointer = p;
+        if let Some(pk) = &mut self.picker
+            && pk.drag.take().is_some()
+        {
+            return true;
+        }
         match std::mem::replace(&mut self.drag, Drag::None) {
             Drag::Pending { .. } => {
                 // A click without a drag picks what's highlighted: the window
@@ -658,6 +747,14 @@ impl Editor {
     }
 
     pub fn key(&mut self, key: Key, mods: Mods) -> bool {
+        if self.picker.is_some() {
+            match key {
+                Key::Escape => self.close_picker(false),
+                Key::Enter => self.close_picker(true),
+                _ => return false,
+            }
+            return true;
+        }
         // Text entry swallows most keys.
         if let Some(te) = &mut self.text {
             match key {
@@ -789,6 +886,46 @@ impl Editor {
             ui::Button::Save => self.outcome = Some(Outcome::Save),
             ui::Button::Close => self.outcome = Some(Outcome::Cancel),
         }
+    }
+
+    fn open_picker(&mut self, slot: usize) {
+        self.commit_text();
+        self.color = slot;
+        let orig = self.palette[slot];
+        let (h, s, v) = rgb_to_hsv(orig);
+        self.picker = Some(Picker { slot, h, s, v, orig, drag: None });
+    }
+
+    /// Close the picker, keeping the colour or putting the old one back.
+    fn close_picker(&mut self, keep: bool) {
+        let Some(pk) = self.picker.take() else { return };
+        if !keep {
+            self.palette[pk.slot] = pk.orig;
+        } else if self.palette[pk.slot] != pk.orig {
+            self.palette_changed = true;
+        }
+    }
+
+    /// Set the picker's colour from a point on its wheel or slider, and
+    /// carry on with that part while the button is held.
+    fn pick(&mut self, part: ui::PickerPart, p: Pt) {
+        let Some(l) = ui::picker_layout(self) else { return };
+        let Some(pk) = &mut self.picker else { return };
+        match part {
+            ui::PickerPart::Wheel => {
+                // Black has no hue to show: picking one means a colour.
+                if pk.drag.is_none() && pk.v < 0.05 {
+                    pk.v = 1.0;
+                }
+                let (dx, dy) = (p.0 - l.center.0, p.1 - l.center.1);
+                pk.h = dy.atan2(dx).to_degrees().rem_euclid(360.0);
+                pk.s = (dx.hypot(dy) / l.radius).min(1.0);
+            }
+            ui::PickerPart::Value => pk.v = ((p.0 - l.slider.left()) / l.slider.width()).clamp(0.0, 1.0),
+            ui::PickerPart::Panel => {}
+        }
+        pk.drag = Some(part);
+        self.palette[pk.slot] = hsv_to_rgb(pk.h, pk.s, pk.v);
     }
 
     fn push_shape(&mut self, s: Shape) {
@@ -1191,6 +1328,56 @@ mod tests {
         assert_eq!(ed.text_ghost(), None, "not over the toolbar");
     }
 
+    /// Right-clicking a colour opens the picker on it: the wheel sets hue
+    /// and saturation, the slider brightness; Esc puts the colour back,
+    /// Enter or a click elsewhere keeps it.
+    #[test]
+    fn colour_picker_changes_a_palette_slot() {
+        let mut ed = editor(vec![shot("A", 0, 1000, 800, 1, [0, 0, 0])], false);
+        drag(&mut ed, (200.0, 100.0), (800.0, 400.0));
+        let m = Mods::default();
+        let dot = |ed: &Editor, i: usize| {
+            let (r, _) = ui::toolbar_layout(ed).unwrap().1.into_iter().find(|b| b.1 == ui::Button::Color(i)).unwrap();
+            (r.left() + r.width() / 2.0, r.top() + r.height() / 2.0)
+        };
+        ed.button_press(dot(&ed, 2), false, m);
+        assert_eq!(ed.picker.map(|p| p.slot), Some(2));
+        assert_eq!(ed.color, 2, "and picks that colour");
+        let l = ui::picker_layout(&ed).unwrap();
+        assert!(l.panel.bottom() <= ui::toolbar_layout(&ed).unwrap().0.top(), "above the toolbar");
+
+        // Due right of the middle, at the edge: pure red at the current brightness.
+        ed.button_press((l.center.0 + l.radius, l.center.1), true, m);
+        ed.button_release((l.center.0 + l.radius, l.center.1), true);
+        assert_eq!(ed.palette[2], (0xea, 0, 0), "{:?}", ed.palette[2]);
+        // Drag the slider to full brightness, past its end.
+        ed.button_press((l.slider.left() + 2.0, l.slider.top() + 7.0), true, m);
+        ed.pointer_motion((l.slider.right() + 50.0, l.slider.top() + 7.0), m);
+        ed.button_release((l.slider.right() + 50.0, l.slider.top() + 7.0), true);
+        assert_eq!(ed.palette[2], (255, 0, 0));
+        assert_eq!(ed.current_color(), Color::from_rgba8(255, 0, 0, 255));
+        ed.key(Key::Escape, m);
+        assert_eq!((ed.picker, ed.palette[2], ed.palette_changed), (None, PALETTE[2], false), "Esc puts it back");
+
+        ed.button_press(dot(&ed, 0), false, m);
+        let l = ui::picker_layout(&ed).unwrap();
+        ed.button_press((l.center.0, l.center.1 - l.radius / 2.0), true, m);
+        ed.button_release((l.center.0, l.center.1 - l.radius / 2.0), true);
+        ed.button_press((l.panel.left() + 3.0, l.panel.top() + 3.0), true, m);
+        assert!(ed.picker.is_some(), "a click on the panel's edge keeps it open");
+        ed.button_press((300.0, 200.0), true, m);
+        assert!(ed.picker.is_none() && ed.palette_changed && ed.palette[0] != PALETTE[0], "a click elsewhere keeps the colour");
+        assert!(ed.shapes.is_empty() && ed.drag_is_none(), "and does nothing else");
+    }
+
+    #[test]
+    fn hsv_round_trips() {
+        for c in PALETTE {
+            let (h, s, v) = rgb_to_hsv(c);
+            assert_eq!(hsv_to_rgb(h, s, v), c);
+        }
+    }
+
     /// Replays a session the way the overlay does (one persistent buffer,
     /// repainting only damaged rects) and checks the result matches a full
     /// redraw: any region the damage tracking misses shows up as a diff.
@@ -1404,6 +1591,36 @@ mod tests {
         });
         step(&mut ed, &|e| {
             e.scroll(-1.0);
+        });
+        // The colour picker: open, drag on the wheel and slider, close.
+        let (_, btns) = ui::toolbar_layout(&ed).unwrap();
+        let (dot, _) = *btns.iter().find(|b| b.1 == ui::Button::Color(3)).unwrap();
+        step(&mut ed, &|e| {
+            e.button_press((dot.left() + 5.0, dot.top() + 10.0), false, m);
+        });
+        let l = ui::picker_layout(&ed).unwrap();
+        step(&mut ed, &|e| {
+            e.button_press((l.center.0 + 20.0, l.center.1), true, m);
+        });
+        for i in 0..4 {
+            step(&mut ed, &|e| {
+                e.pointer_motion((l.center.0 + 20.0 - i as f32 * 12.0, l.center.1 + i as f32 * 9.0), m);
+            });
+        }
+        step(&mut ed, &|e| {
+            e.button_release((l.center.0, l.center.1), true);
+        });
+        step(&mut ed, &|e| {
+            e.button_press((l.slider.left() + 30.0, l.slider.top() + 7.0), true, m);
+        });
+        step(&mut ed, &|e| {
+            e.pointer_motion((l.slider.left() + 80.0, l.slider.top() + 7.0), m);
+        });
+        step(&mut ed, &|e| {
+            e.button_release((l.slider.left() + 80.0, l.slider.top() + 7.0), true);
+        });
+        step(&mut ed, &|e| {
+            e.key(Key::Enter, m);
         });
         // hover the toolbar to get a tooltip, then leave
         let (_, btns) = ui::toolbar_layout(&ed).unwrap();

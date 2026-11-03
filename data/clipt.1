@@ -226,7 +226,11 @@ Select, rectangle, ellipse, arrow, line, pen, highlighter, text, pixelate
 and numbered counter.
 .TP
 \fB1\fR\-\fB8\fR
-Colour: red, orange, yellow, green, blue, purple, white, black.
+Colour: red, orange, yellow, green, blue, purple, white, black, unless
+\fBpalette\fR says otherwise. Right-click a colour in the toolbar to change
+it with a colour wheel; \fBEnter\fR or a click elsewhere keeps the new
+colour, which is saved to \fBpalette\fR, and \fBEsc\fR puts the old one
+back.
 .TP
 \fBscroll\fR, \fB[\fR, \fB]\fR
 Stroke width.
@@ -276,6 +280,9 @@ strftime pattern for new screenshots, without the extension.
 \fBcolor\fR = \fI1\fR
 Starting colour, 1 to 8: red, orange, yellow, green, blue, purple, white,
 black.
+.TP
+\fBpalette\fR = \fI["#ef4444", ...]\fR
+Colours 1 to 8, as "#rrggbb". The editor's colour wheel writes this.
 .TP
 \fBwidth\fR = \fI4\fR
 Starting stroke width in logical pixels.

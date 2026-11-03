@@ -115,7 +115,8 @@ clipt gnome-extension    # install and enable it; log out and back in once
 Editor: drag to select (click = the highlighted window or screen), drag handles to resize, drag
 inside to move. Tools: **V** select, **R** rectangle, **E** ellipse, **A**
 arrow, **L** line, **P** pen, **M** highlighter, **T** text, **X** pixelate,
-**N** numbered counter. **1–8** colour, scroll or **[ ]** stroke width, Shift
+**N** numbered counter. **1–8** colour (right-click a colour to change it),
+scroll or **[ ]** stroke width, Shift
 for squares and 45° lines. **Enter**/**Ctrl+C**/double-click copies, **Ctrl+S**
 saves, **Ctrl+Z**/**Ctrl+Shift+Z** undo/redo, **Esc** cancels, right-click
 backs out a step.
@@ -148,6 +149,7 @@ something else is copied (Wayland clipboards are owned by a live client).
 save_dir = "~/Pictures/Screenshots"
 filename = "Screenshot_%Y-%m-%d_%H-%M-%S"   # strftime
 color = 1            # 1-8: red orange yellow green blue purple white black
+# palette = ["#ef4444", "#f97316", "#eab308", "#22c55e", "#3b82f6", "#a855f7", "#ffffff", "#111111"]
 width = 4
 copy_on_save = true
 notify = true

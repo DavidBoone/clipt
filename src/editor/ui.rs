@@ -3,7 +3,7 @@
 //! so the chrome stays crisp on HiDPI screens.
 
 use super::shapes::{Pt, RectExt, Shape, Tool, View};
-use super::{Editor, PALETTE};
+use super::{Editor, PALETTE, hsv_to_rgb};
 use crate::text;
 use tiny_skia::{Color, FillRule, LineCap, Path, PathBuilder, PixmapMut, Rect, Stroke, Transform};
 
@@ -265,7 +265,16 @@ pub fn dynamic_layers(ed: &Editor, frame: u64) -> Vec<Layer> {
     };
     let tk = rect_key(tb);
     let rects = tb.and_then(|panel| Rect::from_ltrb(panel.left() - 80.0, panel.top() - 40.0, panel.right() + 80.0, panel.bottom() + 40.0));
-    layers.push(Layer { key: key(&[tk[0], tk[1], tk[2], tk[3], hk, ed.tool as u8 as f32, ed.color as f32]), rects: grow(vec![rects]) });
+    let mut parts = vec![tk[0], tk[1], tk[2], tk[3], hk, ed.tool as u8 as f32, ed.color as f32];
+    parts.extend(ed.palette.iter().map(|&(r, g, b)| u32::from_be_bytes([0, r, g, b]) as f32));
+    layers.push(Layer { key: key(&parts), rects: grow(vec![rects]) });
+
+    // colour picker
+    let (k, r) = match (ed.picker, picker_layout(ed)) {
+        (Some(pk), Some(l)) => (key(&[pk.slot as f32, pk.h, pk.s, pk.v, l.panel.left(), l.panel.top()]), inflate(l.panel, CARD_SHADOW)),
+        _ => (0, None),
+    };
+    layers.push(Layer { key: k, rects: grow(vec![r]) });
 
     // stroke width hint
     let rects = if ed.width_hint { vec![Rect::from_xywh(p.0, p.1, 140.0, 60.0)] } else { Vec::new() };
@@ -365,6 +374,7 @@ pub fn render(ed: &Editor, idx: usize, pm: &mut PixmapMut, origin: (i32, i32)) {
     {
         draw_toolbar(ed, pm, &view, panel, &btns);
     }
+    draw_picker(ed, pm, &view);
 
     if ed.width_hint && bounds.contains(ed.pointer.0, ed.pointer.1) {
         let t = format!("{} px", ed.width as u32);
@@ -763,7 +773,7 @@ fn draw_toolbar(ed: &Editor, pm: &mut PixmapMut, view: &View, panel: Rect, btns:
     for &(r, b) in btns {
         match b {
             Button::Color(i) => {
-                let (cr, cg, cb) = PALETTE[i];
+                let (cr, cg, cb) = ed.palette[i];
                 let c = Color::from_rgba8(cr, cg, cb, 255);
                 let (cx, cy) = (r.left() + r.width() / 2.0, r.top() + r.height() / 2.0);
                 let rad = if ed.color == i { 8.0 } else { 6.5 };
@@ -823,6 +833,137 @@ fn draw_toolbar(ed: &Editor, pm: &mut PixmapMut, view: &View, panel: Rect, btns:
     }
 }
 
+// ---- colour picker -----------------------------------------------------------
+
+/// What a press in the colour picker adjusts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerPart {
+    /// Hue around the wheel, saturation out from its middle.
+    Wheel,
+    /// Brightness, along the slider.
+    Value,
+    /// The rest of the panel: holds the click, changes nothing.
+    Panel,
+}
+
+pub struct PickerLayout {
+    pub panel: Rect,
+    pub center: Pt,
+    pub radius: f32,
+    pub slider: Rect,
+    /// The swatch and hex code.
+    pub footer: Rect,
+}
+
+const WHEEL_R: f32 = 72.0;
+const PICK_PAD: f32 = 14.0;
+
+/// The picker's panel, over the colour it changes: above the toolbar, or
+/// below it when there's no room.
+pub fn picker_layout(ed: &Editor) -> Option<PickerLayout> {
+    let pk = ed.picker?;
+    let (bar, btns) = toolbar_layout(ed)?;
+    let (dot, _) = btns.iter().find(|(_, b)| *b == Button::Color(pk.slot))?;
+    let w = WHEEL_R * 2.0 + PICK_PAD * 2.0;
+    let h = PICK_PAD + WHEEL_R * 2.0 + 14.0 + 14.0 + 12.0 + 24.0 + PICK_PAD;
+    let scr = ed.screens.iter().map(|s| s.bounds()).find(|b| b.contains(dot.left(), dot.top())).unwrap_or_else(|| ed.desktop());
+    let x = (dot.left() + dot.width() / 2.0 - w / 2.0).clamp(scr.left() + 6.0, (scr.right() - w - 6.0).max(scr.left() + 6.0));
+    let y = if bar.top() - 10.0 - h >= scr.top() + 6.0 { bar.top() - 10.0 - h } else { bar.bottom() + 10.0 };
+    let panel = Rect::from_xywh(x, y, w, h)?;
+    let center = (x + w / 2.0, y + PICK_PAD + WHEEL_R);
+    let slider = Rect::from_xywh(x + PICK_PAD, y + PICK_PAD + WHEEL_R * 2.0 + 14.0, w - PICK_PAD * 2.0, 14.0)?;
+    let footer = Rect::from_xywh(x + PICK_PAD, slider.bottom() + 12.0, w - PICK_PAD * 2.0, 24.0)?;
+    Some(PickerLayout { panel, center, radius: WHEEL_R, slider, footer })
+}
+
+/// What the picker would adjust at `p`: `None` outside its panel.
+pub fn picker_hit(ed: &Editor, p: Pt) -> Option<PickerPart> {
+    let l = picker_layout(ed)?;
+    if !l.panel.contains(p.0, p.1) {
+        return None;
+    }
+    let d = (p.0 - l.center.0).hypot(p.1 - l.center.1);
+    if d <= l.radius + 4.0 {
+        Some(PickerPart::Wheel)
+    } else if inflate(l.slider, 6.0).is_some_and(|r| r.contains(p.0, p.1)) {
+        Some(PickerPart::Value)
+    } else {
+        Some(PickerPart::Panel)
+    }
+}
+
+/// Fill `pm` pixel by pixel inside logical rect `r`, with `f` giving each
+/// pixel's colour and coverage from its logical centre.
+fn shade(pm: &mut PixmapMut, view: &View, r: Rect, f: impl Fn(Pt) -> Option<((u8, u8, u8), f32)>) {
+    let s = view.scale;
+    let (a, b) = (view.px((r.left(), r.top())), view.px((r.right(), r.bottom())));
+    let (w, h) = (pm.width() as i32, pm.height() as i32);
+    let (x0, y0) = ((a.0.floor() as i32).max(0), (a.1.floor() as i32).max(0));
+    let (x1, y1) = ((b.0.ceil() as i32).min(w), (b.1.ceil() as i32).min(h));
+    let stride = w as usize * 4;
+    let d = pm.data_mut();
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let lp = ((x as f32 + 0.5 + view.off.0) / s + view.ox, (y as f32 + 0.5 + view.off.1) / s + view.oy);
+            let Some(((r, g, b), cov)) = f(lp) else { continue };
+            if cov <= 0.0 {
+                continue;
+            }
+            let (r, b) = if view.swap_rb { (b, r) } else { (r, b) };
+            let i = y as usize * stride + x as usize * 4;
+            let mix = |dst: u8, src: u8| (src as f32 * cov + dst as f32 * (1.0 - cov)).round() as u8;
+            d[i] = mix(d[i], r);
+            d[i + 1] = mix(d[i + 1], g);
+            d[i + 2] = mix(d[i + 2], b);
+            d[i + 3] = mix(d[i + 3], 255);
+        }
+    }
+}
+
+fn draw_picker(ed: &Editor, pm: &mut PixmapMut, view: &View) {
+    let (Some(pk), Some(l)) = (ed.picker, picker_layout(ed)) else { return };
+    let s = view.scale;
+    card(pm, view, l.panel, 14.0);
+    // The wheel: hue around, saturation outward, at the slider's brightness.
+    let (c, rad) = (l.center, l.radius);
+    if let Some(r) = Rect::from_xywh(c.0 - rad - 1.0, c.1 - rad - 1.0, rad * 2.0 + 2.0, rad * 2.0 + 2.0) {
+        shade(pm, view, r, |p| {
+            let (dx, dy) = (p.0 - c.0, p.1 - c.1);
+            let d = dx.hypot(dy);
+            let cov = ((rad - d) * s + 0.5).clamp(0.0, 1.0);
+            Some((hsv_to_rgb(dy.atan2(dx).to_degrees(), (d / rad).min(1.0), pk.v), cov))
+        });
+    }
+    let ring = |pm: &mut PixmapMut, at: Pt| {
+        circle(pm, view, at, 7.0, None, Some((Color::from_rgba8(0, 0, 0, 120), 3.5)));
+        circle(pm, view, at, 7.0, None, Some((Color::WHITE, 2.0)));
+    };
+    let a = pk.h.to_radians();
+    ring(pm, (c.0 + a.cos() * pk.s * rad, c.1 + a.sin() * pk.s * rad));
+    // The slider: from black to the full-brightness colour.
+    let sl = l.slider;
+    shade(pm, view, sl, |p| Some((hsv_to_rgb(pk.h, pk.s, ((p.0 - sl.left()) / sl.width()).clamp(0.0, 1.0)), 1.0)));
+    stroke_rect(pm, view, sl, Color::from_rgba8(255, 255, 255, 60), 1.0);
+    ring(pm, (sl.left() + pk.v * sl.width(), sl.top() + sl.height() / 2.0));
+    // The colour and its hex code.
+    let (r, g, b) = hsv_to_rgb(pk.h, pk.s, pk.v);
+    let f = l.footer;
+    if let Some(sw) = Rect::from_xywh(f.left(), f.top(), 36.0, f.height()) {
+        let path = rounded(view, sw, 6.0);
+        pm.fill_path(&path, &view.paint(Color::from_rgba8(r, g, b, 255)), FillRule::Winding, Transform::identity(), None);
+        pm.stroke_path(
+            &path,
+            &view.paint(Color::from_rgba8(255, 255, 255, 60)),
+            &Stroke { width: s, ..Default::default() },
+            Transform::identity(),
+            None,
+        );
+    }
+    let th = text::line_height(&ed.fonts.regular, 13.0 * s) / s;
+    let y = f.top() + (f.height() - th) / 2.0;
+    label(ed, pm, view, (f.left() + 46.0, y), 13.0, &format!("#{r:02X}{g:02X}{b:02X}"), ICON(), false);
+}
+
 fn tooltip(ed: &Editor, b: Button) -> String {
     let on = |v: bool| if v { "on" } else { "off" };
     let name = |t: Tool| match t {
@@ -839,7 +980,7 @@ fn tooltip(ed: &Editor, b: Button) -> String {
     };
     match b {
         Button::Tool(t) => format!("{}  {}", name(t), t.hotkey().to_ascii_uppercase()),
-        Button::Color(i) => format!("Colour  {}", i + 1),
+        Button::Color(i) => format!("Colour  {}   ·   right-click to change", i + 1),
         Button::Undo => "Undo  Ctrl+Z".into(),
         Button::Redo => "Redo  Ctrl+Shift+Z".into(),
         Button::Save => "Save  Ctrl+S".into(),
