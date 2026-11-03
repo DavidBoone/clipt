@@ -29,6 +29,7 @@ numbered counters, a highlighter, text and the toolbar](docs/screenshot.png)
 | labwc | ext-image-copy-capture / wlr-screencopy | layer-shell | yes |
 | Hyprland, river, Wayfire, COSMIC | ext-image-copy-capture / wlr-screencopy | layer-shell | same protocols as above; no headless CI run |
 | X11: Xfce, Cinnamon, MATE, LXQt, i3, Openbox, … | GetImage (RandR/Xinerama monitors) | override-redirect windows, MIT-SHM | Xvfb + headless Xorg under Openbox, 1 and 3 monitors |
+| macOS 12+ (preview: screenshots only) | Core Graphics | borderless windows | builds and unit tests; see [macOS](#macos-preview) |
 
 The capture backend is picked automatically (override with `-b ext|wlr|kwin|mutter|portal|x11`
 or `backend =` in the config). On X11 the clipboard supports INCR, so large
@@ -195,6 +196,22 @@ gdbus call --session --dest org.freedesktop.impl.portal.PermissionStore \
   --method org.freedesktop.impl.portal.PermissionStore.SetPermission \
   screenshot true screenshot clipt "['yes']"
 ```
+
+### macOS (preview)
+
+Screenshots work on macOS (recording, the menu bar icon and `clipt update`
+don't yet), but no one has tried them on a real Mac. Builds come from the
+`macos` CI job (the `clipt-macos` artifact), signed with a Developer ID
+and notarised by Apple:
+
+```
+chmod +x clipt
+./clipt full -o test.png              # macOS asks to allow Screen Recording once
+```
+
+⌘ takes the place of Ctrl in the editor (⌘C copies, ⌘S saves, ⌘Z undoes).
+[docs/macos-plan.md](docs/macos-plan.md) has what's done, what's next, and
+a checklist for testers.
 
 ### Shell completions
 

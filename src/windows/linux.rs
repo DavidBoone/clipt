@@ -1,42 +1,10 @@
-//! Where the windows are, so the overlay can highlight the one under the
-//! pointer and select it with a click.
-//!
-//! Wayland has no protocol for this, so each compositor is asked in its own
-//! way: KWin through a throwaway script, Sway and Hyprland over their IPC
-//! sockets, X11 through the EWMH window list, and GNOME (which doesn't tell
-//! applications where windows are) through clipt's optional GNOME Shell
-//! extension (data/gnome-extension). Anything else, or GNOME without the
-//! extension, returns an empty list and the overlay falls back to
-//! highlighting whole monitors.
-//!
-//! Positions are in the same logical desktop coordinates as the outputs. The
-//! list is topmost first.
+//! The window list on Wayland compositors and X11 (Linux and the BSDs).
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::time::Duration;
 
-#[derive(Clone, Debug)]
-pub struct Window {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-    /// App id / WM_CLASS, for the label when there's no title.
-    pub app: String,
-    pub title: String,
-    /// The compositor's own id, for finding the window again while
-    /// recording it: Sway's container id, Hyprland's address, KWin's
-    /// internal id (a UUID), the X11 window id. Empty on GNOME.
-    pub id: String,
-}
-
-impl Window {
-    /// What the hover label shows: the app, since titles are often long.
-    pub fn name(&self) -> &str {
-        if self.app.is_empty() { &self.title } else { &self.app }
-    }
-}
+use super::Window;
 
 /// Visible windows, topmost first. Never fails: a desktop we can't ask just
 /// gets no window highlighting.
@@ -124,8 +92,8 @@ pub fn install_gnome_extension() -> Result<()> {
         );
     }
     const FILES: [(&str, &str); 2] = [
-        ("metadata.json", include_str!("../data/gnome-extension/clipt-windows@jasondyck.github.io/metadata.json")),
-        ("extension.js", include_str!("../data/gnome-extension/clipt-windows@jasondyck.github.io/extension.js")),
+        ("metadata.json", include_str!("../../data/gnome-extension/clipt-windows@jasondyck.github.io/metadata.json")),
+        ("extension.js", include_str!("../../data/gnome-extension/clipt-windows@jasondyck.github.io/extension.js")),
     ];
     let base =
         std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from).unwrap_or_else(|| crate::config::home().join(".local/share"));

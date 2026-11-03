@@ -70,6 +70,7 @@ jobs:
           - riscv64gc-unknown-linux-gnu
           - armv7-unknown-linux-gnueabihf
           - x86_64-unknown-freebsd
+          - x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -84,6 +85,95 @@ jobs:
       - run: cargo clippy --locked --target ${{ matrix.target }} -- -D warnings
         env:
           PKG_CONFIG_ALLOW_CROSS: "1"
+
+  # Built and tested on a Mac. The binary is universal (Apple silicon and
+  # Intel) and uploaded for testers: signed with the Developer ID and
+  # notarised when the repository has the signing secrets (not on pull
+  # requests from forks, which get no secrets), ad-hoc signed otherwise.
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      SIGN: ${{ secrets.MACOS_CERT_P12 != '' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # The examples are the Linux end-to-end tests' input driver and window.
+      - run: cargo clippy --bins --tests --locked -- -D warnings
+      - run: cargo test --locked --bins
+      - run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create -output dist/clipt target/aarch64-apple-darwin/release/clipt target/x86_64-apple-darwin/release/clipt
+          # An ad-hoc signature: Apple silicon runs nothing unsigned.
+          codesign --force --sign - dist/clipt
+      - name: sign and notarise
+        if: env.SIGN == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
+        run: |
+          # A throwaway keychain holding only the certificate.
+          kc="$RUNNER_TEMP/signing.keychain-db"
+          kcpw=$(openssl rand -hex 16)
+          security create-keychain -p "$kcpw" "$kc"
+          security set-keychain-settings -lut 1800 "$kc"
+          security unlock-keychain -p "$kcpw" "$kc"
+          printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$kcpw" "$kc" > /dev/null
+          security list-keychains -d user -s "$kc"
+          # Notarisation needs the hardened runtime and a secure timestamp.
+          codesign --force --options runtime --timestamp --keychain "$kc" --sign "Developer ID Application" dist/clipt
+          codesign --verify --strict --verbose=2 dist/clipt
+          printf '%s\n' "$MACOS_NOTARY_KEY" > "$RUNNER_TEMP/notary.p8"
+          ditto -c -k dist/clipt "$RUNNER_TEMP/clipt.zip"
+          # Apple's queue can take far longer than the job should wait, but a
+          # bare binary's notarisation is looked up online when it first
+          # runs, so this build counts as notarised once Apple accepts it.
+          # Wait ten minutes, then hand it over with the submission's id.
+          auth=(--key "$RUNNER_TEMP/notary.p8" --key-id "$MACOS_NOTARY_KEY_ID" --issuer "$MACOS_NOTARY_ISSUER")
+          xcrun notarytool submit "$RUNNER_TEMP/clipt.zip" "${auth[@]}" --output-format json > "$RUNNER_TEMP/notary.json"
+          id=$(plutil -extract id raw "$RUNNER_TEMP/notary.json")
+          echo "notarisation submission: $id"
+          xcrun notarytool wait "$id" "${auth[@]}" --timeout 10m || true
+          xcrun notarytool info "$id" "${auth[@]}" --output-format json > "$RUNNER_TEMP/notary.json"
+          status=$(plutil -extract status raw "$RUNNER_TEMP/notary.json")
+          echo "notarisation status: $status"
+          case "$status" in
+            Accepted) ;;
+            "In Progress") echo "::warning::Apple is still notarising submission $id; the build will pass Gatekeeper once it's accepted" ;;
+            *)
+              xcrun notarytool log "$id" "${auth[@]}"
+              exit 1
+              ;;
+          esac
+          rm "$RUNNER_TEMP/notary.p8"
+          security delete-keychain "$kc"
+      - run: |
+          codesign --display --verbose=2 dist/clipt 2>&1 | grep -E "^(Authority|TeamIdentifier|Signature)" || true
+          dist/clipt --version
+          dist/clipt list
+      # Whether the runner lets it record the screen varies; the PNG, when
+      # there is one, shows the capture works end to end.
+      - name: capture
+        continue-on-error: true
+        run: |
+          dist/clipt full -o dist/full.png
+          file dist/full.png
+      - uses: actions/upload-artifact@v7
+        with:
+          name: clipt-macos
+          path: dist/
 
   nix:
     runs-on: ubuntu-latest

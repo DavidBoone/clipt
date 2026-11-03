@@ -5,8 +5,8 @@
 
 use super::X11;
 use super::clip::ClipServer;
+use crate::editor::damage::{IRect, merge, screen_rects};
 use crate::editor::{CursorKind, Damage, Editor, Handle, Key, Mods, Outcome};
-use crate::overlay::{IRect, merge, screen_rects};
 use crate::session::{Later, UiSession};
 use anyhow::{Context, Result, bail};
 use std::os::fd::OwnedFd;

@@ -6,6 +6,12 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- macOS, as a preview: the overlay, annotation, copy and save, `clipt full`,
+  `clipt screen` and `clipt list`, with ⌘ for Ctrl in the editor. Not yet
+  tried on a real Mac; recording and the menu bar icon come later (see
+  docs/macos-plan.md). CI builds a universal binary for testers.
+
 ## [0.5.0] - 2026-11-02
 
 ### Added
