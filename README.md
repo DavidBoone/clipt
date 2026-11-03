@@ -113,7 +113,9 @@ clipt gnome-extension    # install and enable it; log out and back in once
 ```
 
 Editor: drag to select (click = the highlighted window or screen), drag handles to resize, drag
-inside to move. Tools: **V** select, **R** rectangle, **E** ellipse, **A**
+inside to move. With **V**, click a shape to pick it: drag it or its
+handles, press a colour or change the width to restyle it, **Delete** to
+remove it; double-click text to edit it. Tools: **V** select, **R** rectangle, **E** ellipse, **A**
 arrow, **L** line, **P** pen, **M** highlighter, **T** text, **X** pixelate,
 **N** numbered counter. **1–8** colour (right-click a colour to change it),
 scroll or **[ ]** stroke width, Shift

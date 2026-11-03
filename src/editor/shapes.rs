@@ -40,7 +40,7 @@ impl Tool {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Shape {
     Rect { a: Pt, b: Pt, color: Color, width: f32 },
     Ellipse { a: Pt, b: Pt, color: Color, width: f32 },
@@ -255,6 +255,149 @@ impl Shape {
                 let h = text::line_height(fonts.bold(), *size) * (t.matches('\n').count() + 1) as f32;
                 pad(Rect::from_xywh(pos.0, pos.1, w.max(1.0) + 4.0, h), 4.0)
             }
+        }
+    }
+}
+
+/// A handle on a selected shape: a corner of a box-like shape, or an end of
+/// a line or arrow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Grip {
+    /// 0 top left, 1 top right, 2 bottom right, 3 bottom left.
+    Corner(u8),
+    Start,
+    End,
+}
+
+/// Sizes that follow the editor's width setting, per shape.
+pub fn marker_width(w: f32) -> f32 {
+    w * 4.0 + 8.0
+}
+pub fn pixel_block(w: f32) -> f32 {
+    6.0 + w * 1.5
+}
+pub fn counter_radius(w: f32) -> f32 {
+    10.0 + w * 1.5
+}
+pub fn text_size(w: f32) -> f32 {
+    12.0 + w * 3.0
+}
+
+fn seg_dist(p: Pt, a: Pt, b: Pt) -> f32 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 == 0.0 { 0.0 } else { (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len2).clamp(0.0, 1.0) };
+    (p.0 - a.0 - t * dx).hypot(p.1 - a.1 - t * dy)
+}
+
+impl Shape {
+    pub fn set_color(&mut self, c: Color) {
+        match self {
+            Shape::Rect { color, .. }
+            | Shape::Ellipse { color, .. }
+            | Shape::Arrow { color, .. }
+            | Shape::Line { color, .. }
+            | Shape::Pen { color, .. }
+            | Shape::Marker { color, .. }
+            | Shape::Text { color, .. }
+            | Shape::Counter { color, .. } => *color = c,
+            Shape::Pixelate { .. } => {}
+        }
+    }
+
+    /// Size the shape as if drawn at the editor's width `w`.
+    pub fn set_width(&mut self, w: f32) {
+        match self {
+            Shape::Rect { width, .. }
+            | Shape::Ellipse { width, .. }
+            | Shape::Arrow { width, .. }
+            | Shape::Line { width, .. }
+            | Shape::Pen { width, .. } => *width = w,
+            Shape::Marker { width, .. } => *width = marker_width(w),
+            Shape::Text { size, .. } => *size = text_size(w),
+            Shape::Pixelate { block, .. } => *block = pixel_block(w),
+            Shape::Counter { radius, .. } => *radius = counter_radius(w),
+        }
+    }
+
+    pub fn translate(&mut self, dx: f32, dy: f32) {
+        let mv = |p: &mut Pt| *p = (p.0 + dx, p.1 + dy);
+        match self {
+            Shape::Rect { a, b, .. }
+            | Shape::Ellipse { a, b, .. }
+            | Shape::Arrow { a, b, .. }
+            | Shape::Line { a, b, .. }
+            | Shape::Pixelate { a, b, .. } => {
+                mv(a);
+                mv(b);
+            }
+            Shape::Pen { pts, .. } | Shape::Marker { pts, .. } => pts.iter_mut().for_each(mv),
+            Shape::Text { pos, .. } | Shape::Counter { pos, .. } => mv(pos),
+        }
+    }
+
+    /// Whether a click at `p` lands on the shape: on the line of an outline
+    /// or stroke, anywhere inside text, a counter or a pixelation.
+    pub fn hit(&self, p: Pt, fonts: &Fonts) -> bool {
+        let near = |w: f32| 6.0 + w / 2.0;
+        match self {
+            Shape::Rect { a, b, width, .. } => norm_rect(*a, *b).is_some_and(|r| {
+                let t = near(*width);
+                let (l, tp, rt, bt) = (r.left(), r.top(), r.right(), r.bottom());
+                let x_in = p.0 >= l - t && p.0 <= rt + t;
+                let y_in = p.1 >= tp - t && p.1 <= bt + t;
+                x_in && y_in && ((p.0 - l).abs() <= t || (p.0 - rt).abs() <= t || (p.1 - tp).abs() <= t || (p.1 - bt).abs() <= t)
+            }),
+            Shape::Ellipse { a, b, width, .. } => norm_rect(*a, *b).is_some_and(|r| {
+                let (rx, ry) = (r.width() / 2.0, r.height() / 2.0);
+                let (dx, dy) = (p.0 - (r.left() + rx), p.1 - (r.top() + ry));
+                let k = (dx / rx.max(0.5)).hypot(dy / ry.max(0.5));
+                (k - 1.0).abs() * rx.min(ry).max(1.0) <= near(*width)
+            }),
+            Shape::Line { a, b, width, .. } => seg_dist(p, *a, *b) <= near(*width),
+            Shape::Arrow { a, b, width, .. } => seg_dist(p, *a, *b) <= near(*width * 3.0),
+            Shape::Pen { pts, width, .. } | Shape::Marker { pts, width, .. } => {
+                let t = near(*width);
+                pts.windows(2).any(|w| seg_dist(p, w[0], w[1]) <= t) || pts.first().is_some_and(|q| (q.0 - p.0).hypot(q.1 - p.1) <= t)
+            }
+            Shape::Pixelate { a, b, .. } => norm_rect(*a, *b).is_some_and(|r| r.contains(p.0, p.1)),
+            Shape::Text { .. } => self.bounds(fonts).is_some_and(|r| r.contains(p.0, p.1)),
+            Shape::Counter { pos, radius, .. } => (p.0 - pos.0).hypot(p.1 - pos.1) <= radius + 3.0,
+        }
+    }
+
+    /// The handles a selected shape can be reshaped by.
+    pub fn grips(&self) -> Vec<(Grip, Pt)> {
+        match self {
+            Shape::Rect { a, b, .. } | Shape::Ellipse { a, b, .. } | Shape::Pixelate { a, b, .. } => norm_rect(*a, *b)
+                .map(|r| {
+                    let c = [(r.left(), r.top()), (r.right(), r.top()), (r.right(), r.bottom()), (r.left(), r.bottom())];
+                    (0..4).map(|i| (Grip::Corner(i as u8), c[i])).collect()
+                })
+                .unwrap_or_default(),
+            Shape::Arrow { a, b, .. } | Shape::Line { a, b, .. } => vec![(Grip::Start, *a), (Grip::End, *b)],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Move grip `g` to `p`. A corner dragged past the opposite one flips
+    /// the box, as the selection does.
+    pub fn drag_grip(&mut self, g: Grip, p: Pt) {
+        match (self, g) {
+            (Shape::Rect { a, b, .. } | Shape::Ellipse { a, b, .. } | Shape::Pixelate { a, b, .. }, Grip::Corner(i)) => {
+                let Some(r) = norm_rect(*a, *b) else { return };
+                // The corner opposite the one dragged stays put.
+                let fixed = match i {
+                    0 => (r.right(), r.bottom()),
+                    1 => (r.left(), r.bottom()),
+                    2 => (r.left(), r.top()),
+                    _ => (r.right(), r.top()),
+                };
+                (*a, *b) = (fixed, p);
+            }
+            (Shape::Arrow { a, .. } | Shape::Line { a, .. }, Grip::Start) => *a = p,
+            (Shape::Arrow { b, .. } | Shape::Line { b, .. }, Grip::End) => *b = p,
+            _ => {}
         }
     }
 }

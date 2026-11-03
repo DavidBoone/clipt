@@ -9,7 +9,7 @@ pub mod ui;
 use crate::capture::{Output, Shot};
 use crate::image::Image;
 use crate::text::Fonts;
-use shapes::{Pt, RectExt, Shape, Tool, View, norm_rect};
+use shapes::{Grip, Pt, RectExt, Shape, Tool, View, norm_rect};
 use tiny_skia::{Color, FilterQuality, Pixmap, PixmapPaint, Rect, Transform};
 
 /// The colours 1-8 start as; `palette` in the config overrides them, and
@@ -112,6 +112,7 @@ pub enum Key {
     Up,
     Down,
     Tab,
+    Delete,
     Char(char),
 }
 
@@ -164,6 +165,17 @@ enum Drag {
         orig: Rect,
     },
     Drawing(Shape),
+    /// Moving or reshaping committed shape `idx`, which is out of `shapes`
+    /// meanwhile and drawn like a shape being drawn. `grip` is the handle
+    /// held, or `None` to move the whole shape.
+    Editing {
+        idx: usize,
+        shape: Shape,
+        orig: Shape,
+        grab: Pt,
+        grip: Option<Grip>,
+        moved: bool,
+    },
 }
 
 /// What a click would select right now, shown before anything is selected.
@@ -178,6 +190,11 @@ pub struct Hover {
 pub struct TextEdit {
     pub pos: Pt,
     pub text: String,
+    pub color: Color,
+    pub size: f32,
+    /// Editing committed text: where it was in `shapes`, and how it was, for
+    /// Esc.
+    orig: Option<(usize, Shape)>,
 }
 
 /// Record mode's sound toggles: the computer's sound and the microphone.
@@ -193,7 +210,11 @@ pub struct Editor {
     pub fonts: Fonts,
     pub sel: Option<Rect>,
     pub shapes: Vec<Shape>,
-    redo: Vec<Shape>,
+    /// `shapes` as it was before each change, and after each undone one.
+    undo: Vec<Vec<Shape>>,
+    redo: Vec<Vec<Shape>>,
+    /// The shape the select tool picked, which moves, restyles and deletes.
+    pub selected: Option<usize>,
     pub tool: Tool,
     pub color: usize,
     /// Colours 1-8.
@@ -253,7 +274,9 @@ impl Editor {
             fonts,
             sel: None,
             shapes: Vec::new(),
+            undo: Vec::new(),
             redo: Vec::new(),
+            selected: None,
             tool: Tool::Select,
             color: color.min(PALETTE.len() - 1),
             palette: PALETTE,
@@ -430,6 +453,7 @@ impl Editor {
             && !self.record
             && matches!(self.drag, Drag::None)
             && self.picker.is_none()
+            && self.shape_at(p).is_none_or(|i| !matches!(self.shapes[i], Shape::Text { .. }))
             && ui::toolbar_hit(self, p).is_none()
             && ui::mode_switch_hit(self, p).is_none())
         .then_some(p)
@@ -437,9 +461,34 @@ impl Editor {
 
     pub fn in_progress(&self) -> Option<&Shape> {
         match &self.drag {
-            Drag::Drawing(s) => Some(s),
+            Drag::Drawing(s) | Drag::Editing { shape: s, .. } => Some(s),
             _ => None,
         }
+    }
+
+    /// The shape the select tool has picked, where it is now.
+    pub fn selected_shape(&self) -> Option<&Shape> {
+        if self.tool != Tool::Select || self.record {
+            return None;
+        }
+        match &self.drag {
+            Drag::Editing { shape, .. } => Some(shape),
+            _ => self.shapes.get(self.selected?),
+        }
+    }
+
+    /// The topmost shape under `p`.
+    fn shape_at(&self, p: Pt) -> Option<usize> {
+        if self.record {
+            return None;
+        }
+        self.shapes.iter().rposition(|s| s.hit(p, &self.fonts))
+    }
+
+    /// A handle of the selected shape under `p`.
+    fn grip_at(&self, p: Pt) -> Option<Grip> {
+        let s = self.shapes.get(self.selected?)?;
+        s.grips().into_iter().find(|(_, q)| (q.0 - p.0).abs() <= 7.0 && (q.1 - p.1).abs() <= 7.0).map(|(g, _)| g)
     }
 
     // ---- geometry helpers ------------------------------------------------
@@ -490,11 +539,17 @@ impl Editor {
             Drag::Moving { .. } => return CursorKind::Move,
             Drag::Resizing { handle, .. } => return CursorKind::Resize(*handle),
             Drag::Creating { .. } | Drag::Pending { .. } | Drag::Drawing(_) => return CursorKind::Crosshair,
+            Drag::Editing { grip: None, .. } => return CursorKind::Move,
+            Drag::Editing { grip: Some(_), .. } => return CursorKind::Crosshair,
             Drag::None => {}
         }
         match self.tool {
             Tool::Select => {
-                if let Some(h) = self.handle_at(p) {
+                if self.grip_at(p).is_some() {
+                    CursorKind::Crosshair
+                } else if self.shape_at(p).is_some() {
+                    CursorKind::Move
+                } else if let Some(h) = self.handle_at(p) {
                     CursorKind::Resize(h)
                 } else if self.sel.is_some_and(|r| r.contains(p.0, p.1)) {
                     CursorKind::Move
@@ -502,6 +557,7 @@ impl Editor {
                     CursorKind::Crosshair
                 }
             }
+            Tool::Text if self.shape_at(p).is_some_and(|i| matches!(self.shapes[i], Shape::Text { .. })) => CursorKind::Pointer,
             Tool::Text => CursorKind::Text,
             _ => CursorKind::Crosshair,
         }
@@ -582,6 +638,24 @@ impl Editor {
                     Shape::Text { .. } => {}
                 }
             }
+            Drag::Editing { idx, shape, orig, grab, grip, moved } => {
+                if !*moved && (p.0 - grab.0).abs() <= CLICK_SLOP && (p.1 - grab.1).abs() <= CLICK_SLOP {
+                    return false;
+                }
+                if !*moved {
+                    // The first real move is the change undo goes back from.
+                    *moved = true;
+                    let mut before = self.shapes.clone();
+                    before.insert(*idx, orig.clone());
+                    self.undo.push(before);
+                    self.redo.clear();
+                }
+                *shape = orig.clone();
+                match grip {
+                    Some(g) => shape.drag_grip(*g, p),
+                    None => shape.translate(p.0 - grab.0, p.1 - grab.1),
+                }
+            }
         }
         true
     }
@@ -611,11 +685,14 @@ impl Editor {
                 self.open_picker(i);
                 return true;
             }
-            // Right click backs out: in-progress drag, then text, then selection.
+            // Right click backs out: in-progress drag, then text, then the
+            // picked shape, then the selection.
             if !matches!(self.drag, Drag::None) {
-                self.drag = Drag::None;
+                self.cancel_drag();
             } else if self.text.is_some() {
-                self.text = None;
+                self.cancel_text();
+            } else if self.selected.take().is_some() {
+                self.revision += 1;
             } else if self.shapes.is_empty() {
                 self.sel = None;
                 self.tool = Tool::Select;
@@ -639,27 +716,53 @@ impl Editor {
         let double =
             self.last_click.is_some_and(|(t, q)| now.duration_since(t).as_millis() < 400 && (q.0 - p.0).hypot(q.1 - p.1) < CLICK_SLOP);
         self.last_click = Some((now, p));
-        if double && self.tool == Tool::Select && self.sel.is_some_and(|r| r.contains(p.0, p.1)) {
-            self.outcome = Some(self.accept());
-            return true;
+        let on_shape = self.shape_at(p);
+        if double && self.tool == Tool::Select {
+            match on_shape {
+                Some(i) if matches!(self.shapes[i], Shape::Text { .. }) => {
+                    self.edit_text(i);
+                    return true;
+                }
+                Some(_) => {}
+                None if self.sel.is_some_and(|r| r.contains(p.0, p.1)) => {
+                    self.outcome = Some(self.accept());
+                    return true;
+                }
+                None => {}
+            }
         }
 
         match self.tool {
             Tool::Select => {
-                if let (Some(h), Some(r)) = (self.handle_at(p), self.sel) {
+                if let Some(g) = self.grip_at(p) {
+                    self.start_edit(self.selected.unwrap(), p, Some(g));
+                } else if let Some(i) = on_shape {
+                    self.start_edit(i, p, None);
+                } else if let (Some(h), Some(r)) = (self.handle_at(p), self.sel) {
                     self.drag = Drag::Resizing { handle: h, orig: r };
                 } else if let Some(r) = self.sel.filter(|r| r.contains(p.0, p.1)) {
                     self.drag = Drag::Moving { grab: p, orig: r };
                 } else {
                     self.drag = Drag::Pending { start: p };
                 }
+                if self.selected.is_some() && !matches!(self.drag, Drag::Editing { .. }) {
+                    self.selected = None;
+                    self.revision += 1;
+                }
             }
             Tool::Text => {
                 self.commit_text();
+                // Clicking text edits it.
+                if let Some(i) = self.shape_at(p).filter(|&i| matches!(self.shapes[i], Shape::Text { .. })) {
+                    self.edit_text(i);
+                    return true;
+                }
                 // The I-beam's middle is where people aim: centre the first
                 // line on the click, not hang the text below it.
-                let lh = crate::text::line_height(self.fonts.bold(), self.text_size());
-                self.text = Some(TextEdit { pos: (p.0, p.1 - lh / 2.0), text: String::new() });
+                let size = self.text_size();
+                let lh = crate::text::line_height(self.fonts.bold(), size);
+                let (pos, color) = ((p.0, p.1 - lh / 2.0), self.current_color());
+                self.text = Some(TextEdit { pos, text: String::new(), color, size, orig: None });
             }
             tool => {
                 self.commit_text();
@@ -678,11 +781,11 @@ impl Editor {
                     Tool::Arrow => Shape::Arrow { a: p, b: p, color, width },
                     Tool::Line => Shape::Line { a: p, b: p, color, width },
                     Tool::Pen => Shape::Pen { pts: vec![p], color, width },
-                    Tool::Marker => Shape::Marker { pts: vec![p], color, width: width * 4.0 + 8.0 },
-                    Tool::Pixelate => Shape::Pixelate { a: p, b: p, block: 6.0 + width * 1.5 },
+                    Tool::Marker => Shape::Marker { pts: vec![p], color, width: shapes::marker_width(width) },
+                    Tool::Pixelate => Shape::Pixelate { a: p, b: p, block: shapes::pixel_block(width) },
                     Tool::Counter => {
                         let n = self.shapes.iter().filter(|s| matches!(s, Shape::Counter { .. })).count() as u32 + 1;
-                        Shape::Counter { pos: p, n, color, radius: 10.0 + width * 1.5 }
+                        Shape::Counter { pos: p, n, color, radius: shapes::counter_radius(width) }
                     }
                     Tool::Select | Tool::Text => unreachable!(),
                 };
@@ -731,6 +834,10 @@ impl Editor {
                     self.push_shape(shape);
                 }
             }
+            Drag::Editing { idx, shape, .. } => {
+                self.shapes.insert(idx, shape);
+                self.revision += 1;
+            }
             Drag::Moving { .. } | Drag::Resizing { .. } | Drag::None => {}
         }
         true
@@ -743,6 +850,8 @@ impl Editor {
         let step = if dy > 0.0 { -1.0 } else { 1.0 };
         self.width = (self.width + step).clamp(1.0, 40.0);
         self.width_hint = true;
+        let w = self.width;
+        self.restyle(|s| s.set_width(w));
         true
     }
 
@@ -758,7 +867,7 @@ impl Editor {
         // Text entry swallows most keys.
         if let Some(te) = &mut self.text {
             match key {
-                Key::Escape => self.text = None,
+                Key::Escape => self.cancel_text(),
                 Key::Enter if mods.shift => te.text.push('\n'),
                 Key::Enter => self.commit_text(),
                 Key::Backspace => {
@@ -795,7 +904,10 @@ impl Editor {
         match key {
             Key::Escape => {
                 if !matches!(self.drag, Drag::None) {
-                    self.drag = Drag::None;
+                    self.cancel_drag();
+                } else if self.selected_shape().is_some() {
+                    self.selected = None;
+                    self.revision += 1;
                 } else {
                     self.outcome = Some(Outcome::Cancel);
                 }
@@ -803,7 +915,6 @@ impl Editor {
             Key::Enter => self.outcome = Some(Outcome::Copy),
             Key::Tab if self.sel.is_none() && !self.windows.is_empty() => self.hover_screen = !self.hover_screen,
             Key::Left | Key::Right | Key::Up | Key::Down => {
-                let Some(r) = self.sel else { return false };
                 let d = if mods.alt { 10.0 } else { 1.0 };
                 let (dx, dy) = match key {
                     Key::Left => (-d, 0.0),
@@ -811,22 +922,29 @@ impl Editor {
                     Key::Up => (0.0, -d),
                     _ => (0.0, d),
                 };
+                // A picked shape moves; otherwise the selection does.
+                if self.selected_shape().is_some() {
+                    self.restyle(|s| s.translate(dx, dy));
+                    return true;
+                }
+                let Some(r) = self.sel else { return false };
                 self.sel = if mods.shift {
                     Rect::from_xywh(r.left(), r.top(), (r.width() + dx).max(1.0), (r.height() + dy).max(1.0))
                 } else {
                     Some(self.clamp_to_desktop(r.translate(dx, dy).unwrap_or(r)))
                 };
             }
-            Key::Char(c @ '1'..='8') => self.color = c as usize - '1' as usize,
+            Key::Char(c @ '1'..='8') => self.set_color(c as usize - '1' as usize),
             Key::Char('[') => return self.scroll(1.0),
             Key::Char(']') => return self.scroll(-1.0),
             Key::Char(c) => {
                 let c = c.to_ascii_lowercase();
                 let Some(t) = std::iter::once(Tool::Select).chain(Tool::DRAWING).find(|t| t.hotkey() == c) else { return false };
-                self.tool = t;
+                self.set_tool(t);
             }
+            Key::Backspace | Key::Delete if self.selected_shape().is_some() => self.delete_selected(),
             Key::Backspace => self.undo(),
-            Key::Tab => return false,
+            Key::Delete | Key::Tab => return false,
         }
         true
     }
@@ -835,8 +953,9 @@ impl Editor {
     /// in record mode: a recording is of the live screen, without them.
     fn switch_mode(&mut self) {
         self.record = !self.record;
-        self.text = None;
-        self.drag = Drag::None;
+        self.cancel_text();
+        self.cancel_drag();
+        self.selected = None;
         // The toolbar, hint and shapes all change.
         self.revision += 1;
     }
@@ -878,8 +997,8 @@ impl Editor {
             ui::Button::SystemSound => self.sound.system = !self.sound.system,
             ui::Button::Mic => self.sound.mic = !self.sound.mic,
             ui::Button::RecordMode | ui::Button::ShotMode => self.switch_mode(),
-            ui::Button::Tool(t) => self.tool = t,
-            ui::Button::Color(i) => self.color = i,
+            ui::Button::Tool(t) => self.set_tool(t),
+            ui::Button::Color(i) => self.set_color(i),
             ui::Button::Undo => self.undo(),
             ui::Button::Redo => self.redo(),
             ui::Button::Copy => self.outcome = Some(Outcome::Copy),
@@ -928,35 +1047,125 @@ impl Editor {
         self.palette[pk.slot] = hsv_to_rgb(pk.h, pk.s, pk.v);
     }
 
-    fn push_shape(&mut self, s: Shape) {
-        self.shapes.push(s);
-        self.redo.clear();
+    fn set_tool(&mut self, t: Tool) {
+        self.tool = t;
+        if self.selected.take().is_some() {
+            self.revision += 1;
+        }
+    }
+
+    /// Pick colour `i`, and give it to the picked shape.
+    fn set_color(&mut self, i: usize) {
+        self.color = i;
+        let c = self.current_color();
+        self.restyle(|s| s.set_color(c));
+    }
+
+    /// Change the picked shape, if there is one, as one undoable step.
+    fn restyle(&mut self, f: impl FnOnce(&mut Shape)) {
+        if self.selected_shape().is_none() || !matches!(self.drag, Drag::None) {
+            return;
+        }
+        let Some(i) = self.selected else { return };
+        self.checkpoint();
+        f(&mut self.shapes[i]);
         self.revision += 1;
     }
 
+    fn delete_selected(&mut self) {
+        let Some(i) = self.selected.take() else { return };
+        self.checkpoint();
+        self.shapes.remove(i);
+        self.revision += 1;
+    }
+
+    /// Save `shapes` for undo, before changing them.
+    fn checkpoint(&mut self) {
+        self.undo.push(self.shapes.clone());
+        self.redo.clear();
+    }
+
+    fn push_shape(&mut self, s: Shape) {
+        self.checkpoint();
+        self.shapes.push(s);
+        self.selected = None;
+        self.revision += 1;
+    }
+
+    /// Start moving shape `i` (or reshaping it by `grip`), and pick it.
+    fn start_edit(&mut self, idx: usize, p: Pt, grip: Option<Grip>) {
+        let shape = self.shapes.remove(idx);
+        self.selected = Some(idx);
+        self.drag = Drag::Editing { idx, orig: shape.clone(), shape, grab: p, grip, moved: false };
+        self.revision += 1;
+    }
+
+    /// Drop whatever drag is going on; a shape being edited goes back as it was.
+    fn cancel_drag(&mut self) {
+        if let Drag::Editing { idx, orig, moved, .. } = std::mem::replace(&mut self.drag, Drag::None) {
+            self.shapes.insert(idx, orig);
+            if moved {
+                self.undo.pop();
+            }
+            self.revision += 1;
+        }
+    }
+
+    /// Reopen text shape `i` for typing, in its own colour and size.
+    fn edit_text(&mut self, i: usize) {
+        let Shape::Text { pos, text, color, size } = self.shapes[i].clone() else { return };
+        self.checkpoint();
+        let orig = self.shapes.remove(i);
+        self.selected = None;
+        self.text = Some(TextEdit { pos, text, color, size, orig: Some((i, orig)) });
+        self.revision += 1;
+    }
+
+    /// Esc while typing: new text goes, edited text goes back as it was.
+    fn cancel_text(&mut self) {
+        if let Some(TextEdit { orig: Some((i, shape)), .. }) = self.text.take() {
+            self.shapes.insert(i, shape);
+            self.undo.pop();
+            self.revision += 1;
+        }
+    }
+
     fn commit_text(&mut self) {
-        if let Some(te) = self.text.take()
-            && !te.text.trim().is_empty()
-        {
-            let size = self.text_size();
-            self.push_shape(Shape::Text { pos: te.pos, text: te.text, color: self.current_color(), size });
+        let Some(te) = self.text.take() else { return };
+        let keep = !te.text.trim().is_empty();
+        let shape = Shape::Text { pos: te.pos, text: te.text, color: te.color, size: te.size };
+        match te.orig {
+            // Edited: back in its place, or gone if emptied (undo restores it).
+            Some((i, orig)) => {
+                if shape == orig {
+                    self.undo.pop();
+                }
+                if keep {
+                    self.shapes.insert(i, shape);
+                }
+                self.revision += 1;
+            }
+            None if keep => self.push_shape(shape),
+            None => {}
         }
     }
 
     pub fn text_size(&self) -> f32 {
-        12.0 + self.width * 3.0
+        shapes::text_size(self.width)
     }
 
     fn undo(&mut self) {
-        if let Some(s) = self.shapes.pop() {
-            self.redo.push(s);
+        if let Some(prev) = self.undo.pop() {
+            self.redo.push(std::mem::replace(&mut self.shapes, prev));
+            self.selected = None;
             self.revision += 1;
         }
     }
 
     fn redo(&mut self) {
-        if let Some(s) = self.redo.pop() {
-            self.shapes.push(s);
+        if let Some(next) = self.redo.pop() {
+            self.undo.push(std::mem::replace(&mut self.shapes, next));
+            self.selected = None;
             self.revision += 1;
         }
     }
@@ -1370,6 +1579,120 @@ mod tests {
         assert!(ed.shapes.is_empty() && ed.drag_is_none(), "and does nothing else");
     }
 
+    /// The select tool picks shapes: drag to move, handles to reshape,
+    /// colour and width keys restyle, Delete removes, and undo steps back
+    /// through all of it.
+    #[test]
+    fn shapes_move_reshape_restyle_and_delete() {
+        let mut ed = editor(vec![shot("A", 0, 800, 600, 1, [0, 0, 0])], false);
+        let m = Mods::default();
+        drag(&mut ed, (0.0, 0.0), (700.0, 500.0));
+        ed.tool = Tool::Rect;
+        drag(&mut ed, (100.0, 100.0), (200.0, 150.0));
+        ed.tool = Tool::Arrow;
+        drag(&mut ed, (300.0, 300.0), (400.0, 300.0));
+        ed.key(Key::Char('v'), m);
+        let sel = ed.sel;
+
+        // A click on the rectangle's edge picks it; a drag moves it.
+        drag(&mut ed, (100.0, 125.0), (130.0, 145.0));
+        assert_eq!(ed.selected, Some(0));
+        assert!(matches!(ed.shapes[0], Shape::Rect { a: (130.0, 120.0), b: (230.0, 170.0), .. }), "{:?}", ed.shapes[0]);
+        assert_eq!(ed.sel, sel, "the capture area stays put");
+        assert_eq!(ed.shapes.len(), 2);
+        // Its bottom-right handle reshapes it.
+        drag(&mut ed, (230.0, 170.0), (260.0, 200.0));
+        assert!(matches!(ed.shapes[0], Shape::Rect { a: (130.0, 120.0), b: (260.0, 200.0), .. }), "{:?}", ed.shapes[0]);
+        // Colour and width go to the picked shape.
+        ed.key(Key::Char('5'), m);
+        ed.key(Key::Char(']'), m);
+        let Shape::Rect { color, width, .. } = ed.shapes[0] else { panic!() };
+        assert_eq!((color, width), (ed.current_color(), ed.width));
+        assert_eq!(ed.width, 5.0);
+        // The arrow's end moves on its own.
+        drag(&mut ed, (350.0, 300.0), (350.0, 300.0));
+        assert_eq!(ed.selected, Some(1));
+        drag(&mut ed, (400.0, 300.0), (420.0, 340.0));
+        assert!(matches!(ed.shapes[1], Shape::Arrow { a: (300.0, 300.0), b: (420.0, 340.0), .. }), "{:?}", ed.shapes[1]);
+        ed.key(Key::Delete, m);
+        assert_eq!((ed.shapes.len(), ed.selected), (1, None));
+
+        // Undo walks back: the delete, the arrow's end, the width, the
+        // colour, the reshape, the move.
+        let ctrl = Mods { ctrl: true, ..m };
+        ed.key(Key::Char('z'), ctrl);
+        assert_eq!(ed.shapes.len(), 2);
+        for _ in 0..5 {
+            ed.key(Key::Char('z'), ctrl);
+        }
+        assert!(matches!(ed.shapes[0], Shape::Rect { a: (100.0, 100.0), b: (200.0, 150.0), .. }), "{:?}", ed.shapes[0]);
+        ed.key(Key::Char('Z'), Mods { shift: true, ..ctrl });
+        assert!(matches!(ed.shapes[0], Shape::Rect { a: (130.0, 120.0), .. }), "redo");
+
+        // Esc lets go of the shape before it cancels; a right-click mid-drag
+        // puts the shape back.
+        drag(&mut ed, (130.0, 145.0), (130.0, 145.0));
+        assert_eq!(ed.selected, Some(0));
+        ed.key(Key::Escape, m);
+        assert_eq!((ed.selected, ed.outcome), (None, None));
+        ed.button_press((130.0, 145.0), true, m);
+        ed.pointer_motion((300.0, 400.0), m);
+        ed.button_press((300.0, 400.0), false, m);
+        assert!(matches!(ed.shapes[0], Shape::Rect { a: (130.0, 120.0), .. }), "{:?}", ed.shapes[0]);
+        assert!(ed.drag_is_none());
+        // A click on nothing lets go and works the capture area as before.
+        drag(&mut ed, (130.0, 145.0), (130.0, 145.0));
+        drag(&mut ed, (500.0, 450.0), (510.0, 450.0));
+        assert_eq!(ed.selected, None);
+        assert_eq!(ed.sel.unwrap().left(), sel.unwrap().left() + 10.0);
+    }
+
+    /// Text reopens for typing: double-click it with the select tool, or
+    /// click it with the text tool. It keeps its colour, size and place;
+    /// Esc puts it back as it was.
+    #[test]
+    fn text_can_be_edited_again() {
+        let mut ed = editor(vec![shot("A", 0, 800, 600, 1, [0, 0, 0])], false);
+        let m = Mods::default();
+        drag(&mut ed, (0.0, 0.0), (700.0, 500.0));
+        ed.tool = Tool::Rect;
+        drag(&mut ed, (400.0, 400.0), (450.0, 450.0));
+        ed.tool = Tool::Text;
+        ed.color = 2;
+        ed.button_press((100.0, 100.0), true, m);
+        for c in "hi".chars() {
+            ed.key(Key::Char(c), m);
+        }
+        ed.key(Key::Enter, m);
+        ed.tool = Tool::Rect;
+        drag(&mut ed, (500.0, 400.0), (550.0, 450.0));
+        let Shape::Text { color, size, pos, .. } = ed.shapes[1].clone() else { panic!("{:?}", ed.shapes[1]) };
+        ed.color = 5;
+        ed.width = 10.0;
+
+        ed.key(Key::Char('v'), m);
+        ed.button_press((105.0, 100.0), true, m);
+        ed.button_release((105.0, 100.0), true);
+        ed.button_press((105.0, 100.0), true, m);
+        ed.button_release((105.0, 100.0), true);
+        let te = ed.text.as_ref().expect("double-click opens it");
+        assert_eq!((te.text.as_str(), te.color, te.size, te.pos), ("hi", color, size, pos), "in its own style");
+        assert_eq!(ed.shapes.len(), 2);
+        ed.key(Key::Char('!'), m);
+        ed.key(Key::Escape, m);
+        assert!(matches!(&ed.shapes[1], Shape::Text { text, .. } if text == "hi"), "Esc keeps the old text, in place");
+
+        ed.tool = Tool::Text;
+        ed.button_press((105.0, 100.0), true, m);
+        assert!(ed.text.is_some(), "the text tool reopens it too");
+        ed.key(Key::Char('!'), m);
+        ed.key(Key::Enter, m);
+        assert_eq!(ed.shapes.len(), 3);
+        assert!(matches!(&ed.shapes[1], Shape::Text { text, color: c, .. } if text == "hi!" && *c == color), "{:?}", ed.shapes[1]);
+        ed.key(Key::Char('z'), Mods { ctrl: true, ..m });
+        assert!(matches!(&ed.shapes[1], Shape::Text { text, .. } if text == "hi"), "undo");
+    }
+
     #[test]
     fn hsv_round_trips() {
         for c in PALETTE {
@@ -1591,6 +1914,27 @@ mod tests {
         });
         step(&mut ed, &|e| {
             e.scroll(-1.0);
+        });
+        // Pick the pen stroke and move it, then let go.
+        step(&mut ed, &|e| {
+            e.key(Key::Char('v'), m);
+        });
+        step(&mut ed, &|e| {
+            e.button_press((100.0, 100.0), true, m);
+        });
+        for i in 1..5 {
+            step(&mut ed, &|e| {
+                e.pointer_motion((100.0 + i as f32 * 15.0, 100.0 + i as f32 * 8.0), m);
+            });
+        }
+        step(&mut ed, &|e| {
+            e.button_release((160.0, 132.0), true);
+        });
+        step(&mut ed, &|e| {
+            e.key(Key::Char('2'), m);
+        });
+        step(&mut ed, &|e| {
+            e.key(Key::Escape, m);
         });
         // The colour picker: open, drag on the wheel and slider, close.
         let (_, btns) = ui::toolbar_layout(&ed).unwrap();

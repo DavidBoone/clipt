@@ -287,14 +287,28 @@ pub fn dynamic_layers(ed: &Editor, frame: u64) -> Vec<Layer> {
     // text being typed
     let (k, r) = match &ed.text {
         Some(te) => {
-            let shape = Shape::Text { pos: te.pos, text: format!("{}MM", te.text), color: Color::BLACK, size: ed.text_size() };
-            let mut parts = vec![te.pos.0, te.pos.1, ed.text_size(), ed.color as f32];
+            let shape = Shape::Text { pos: te.pos, text: format!("{}MM", te.text), color: Color::BLACK, size: te.size };
+            let c = te.color;
+            let mut parts = vec![te.pos.0, te.pos.1, te.size, c.red(), c.green(), c.blue()];
             parts.extend(te.text.chars().map(|c| c as u32 as f32));
             (key(&parts), shape.bounds(&ed.fonts))
         }
         None => (0, None),
     };
     layers.push(Layer { key: k, rects: grow(vec![r]) });
+
+    // the picked shape's outline and handles
+    let (k, rects) = match ed.selected_shape().and_then(|s| Some((s.bounds(&ed.fonts)?, s.grips()))) {
+        Some((b, grips)) => {
+            let mut parts = rect_key(Some(b)).to_vec();
+            parts.extend(grips.iter().flat_map(|(_, p)| [p.0, p.1]));
+            let mut rects = vec![Some(b)];
+            rects.extend(grips.iter().map(|(_, p)| Rect::from_xywh(p.0 - 6.0, p.1 - 6.0, 12.0, 12.0)));
+            (key(&parts), rects)
+        }
+        None => (0, Vec::new()),
+    };
+    layers.push(Layer { key: k, rects: grow(rects) });
 
     // where a click would start text
     let (k, r) = match ed.text_ghost() {
@@ -327,8 +341,8 @@ pub fn render(ed: &Editor, idx: usize, pm: &mut PixmapMut, origin: (i32, i32)) {
         super::shapes::draw_all(pm, &view, size, &shapes, &ed.fonts, &fill);
     }
     if let Some(te) = &ed.text {
-        let size = ed.text_size();
-        let shape = Shape::Text { pos: te.pos, text: te.text.clone(), color: ed.current_color(), size };
+        let size = te.size;
+        let shape = Shape::Text { pos: te.pos, text: te.text.clone(), color: te.color, size };
         shape.draw(pm, &view, &ed.fonts);
         // caret after the last line
         let last = te.text.rsplit('\n').next().unwrap_or("");
@@ -345,7 +359,10 @@ pub fn render(ed: &Editor, idx: usize, pm: &mut PixmapMut, origin: (i32, i32)) {
             pm.stroke_path(&path, &view.paint(Color::from_rgba8(0, 0, 0, 90)), &st(3.0), id, None);
             pm.stroke_path(&path, &view.paint(Color::from_rgba8(255, 255, 255, 170)), &st(1.0), id, None);
         }
-        text_cursor(pm, &view, (cx, cy), lh, ed.current_color(), 1.0);
+        text_cursor(pm, &view, (cx, cy), lh, te.color, 1.0);
+    }
+    if let Some(shape) = ed.selected_shape() {
+        draw_picked(pm, &view, shape, &ed.fonts);
     }
     if let Some(p) = ed.text_ghost() {
         let lh = text::line_height(ed.fonts.bold(), ed.text_size() * s) / s;
@@ -417,6 +434,28 @@ fn background(ed: &Editor, idx: usize, pm: &mut PixmapMut, origin: (i32, i32)) {
             }
             _ => dim_copy(drow, srow),
         }
+    }
+}
+
+/// The picked shape: a dashed box around it, and its handles.
+fn draw_picked(pm: &mut PixmapMut, view: &View, shape: &Shape, fonts: &crate::text::Fonts) {
+    let s = view.scale;
+    let id = Transform::identity();
+    if let Some(b) = shape.bounds(fonts) {
+        let (a, c) = (view.px((b.left(), b.top())), view.px((b.right(), b.bottom())));
+        if let Some(r) = Rect::from_ltrb(a.0, a.1, c.0, c.1) {
+            let path = PathBuilder::from_rect(r);
+            pm.stroke_path(&path, &view.paint(Color::from_rgba8(0, 0, 0, 110)), &Stroke { width: 3.0 * s, ..Default::default() }, id, None);
+            let dash = tiny_skia::StrokeDash::new(vec![5.0 * s, 4.0 * s], 0.0);
+            let st = Stroke { width: (1.5 * s).max(1.0), dash, ..Default::default() };
+            pm.stroke_path(&path, &view.paint(ACCENT()), &st, id, None);
+        }
+    }
+    for (_, p) in shape.grips() {
+        let Some(r) = Rect::from_xywh(p.0 - 4.5, p.1 - 4.5, 9.0, 9.0) else { continue };
+        let path = rounded(view, r, 2.0);
+        pm.fill_path(&path, &view.paint(Color::WHITE), FillRule::Winding, id, None);
+        pm.stroke_path(&path, &view.paint(ACCENT()), &Stroke { width: (1.5 * s).max(1.0), ..Default::default() }, id, None);
     }
 }
 
@@ -967,7 +1006,7 @@ fn draw_picker(ed: &Editor, pm: &mut PixmapMut, view: &View) {
 fn tooltip(ed: &Editor, b: Button) -> String {
     let on = |v: bool| if v { "on" } else { "off" };
     let name = |t: Tool| match t {
-        Tool::Select => "Select",
+        Tool::Select => "Select and move",
         Tool::Rect => "Rectangle",
         Tool::Ellipse => "Ellipse",
         Tool::Arrow => "Arrow",

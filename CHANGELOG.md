@@ -10,6 +10,10 @@ All notable changes are listed here. The format follows
 - A colour wheel for the editor's colours: right-click one of the eight in
   the toolbar to change it. The new colours are kept in the config as
   `palette`, which can also be set by hand.
+- Shapes can be changed after they're drawn: with the select tool (V),
+  click one to pick it, then drag it or its handles, choose a colour or
+  width to restyle it, or press Delete. Double-click text, or click it with
+  the text tool, to edit it. Undo steps back through all of it.
 - macOS: `clipt.app`, in each release as `clipt-vX.Y.Z-macos-app.zip`,
   signed, notarised and stapled. macOS keeps its Screen Recording
   permission under clipt rather than the terminal that started it, and it
