@@ -6,6 +6,8 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-03
+
 ### Added
 - macOS, as a preview: the overlay, annotation, copy and save, `clipt full`,
   `clipt screen` and `clipt list`, with ⌘ for Ctrl in the editor. Not yet
