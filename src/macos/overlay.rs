@@ -2,6 +2,13 @@
 //! else (the menu bar and the Dock too), each showing its screen through a
 //! layer whose contents are a bitmap the editor paints, as on X11.
 //!
+//! The bitmap reaches the window server through two IOSurfaces per window,
+//! shared memory it reads directly: a frame copies only its damaged
+//! rectangles into the surface not on screen, then shows that one. Handing
+//! the layer a fresh CGImage each frame instead copied, colour-matched and
+//! uploaded the whole screen (about 24 MB on a Retina display), which made
+//! the hover glide drop frames.
+//!
 //! clipt runs its own event loop instead of `NSApplication.run`, so that
 //! `run` can return once the user has decided; key events are handled here
 //! and not passed on, since no responder would take them and AppKit beeps.
@@ -17,12 +24,13 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSCursor, NSEvent, NSEventMask, NSEventModifierFlags,
     NSEventType, NSScreenSaverWindowLevel, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
-use objc2_core_foundation::{CFData, CFRetained};
-use objc2_core_graphics::{
-    CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGDisplayBounds, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo,
-    CGMainDisplayID, kCGColorSpaceSRGB,
-};
+use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString};
+use objc2_core_graphics::{CGColorSpace, CGDisplayBounds, CGMainDisplayID, kCGColorSpaceSRGB};
 use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize};
+use objc2_io_surface::{
+    IOSurfaceLockOptions, IOSurfaceRef, kIOSurfaceBytesPerElement, kIOSurfaceColorSpace, kIOSurfaceHeight, kIOSurfacePixelFormat,
+    kIOSurfaceWidth,
+};
 use objc2_quartz_core::{CALayer, CATransaction};
 
 define_class!(
@@ -47,6 +55,17 @@ struct Win {
     /// What the window shows, BGRX, at the display's native size.
     buf: Vec<u8>,
     full: bool,
+    /// Double-buffered copies of `buf` for the window server; `back` is the
+    /// one not on screen, which the next frame updates.
+    surfaces: [Surface; 2],
+    back: usize,
+}
+
+struct Surface {
+    surface: CFRetained<IOSurfaceRef>,
+    /// Parts of `buf` that changed since this surface was last brought up to
+    /// date; `None` means all of it.
+    stale: Option<Vec<IRect>>,
 }
 
 pub struct Session {
@@ -54,7 +73,6 @@ pub struct Session {
     app: Retained<NSApplication>,
     editor: Editor,
     wins: Vec<Win>,
-    space: CFRetained<CGColorSpace>,
     /// Height of the main display, for turning AppKit's coordinates (y up
     /// from the main display's bottom) into the editor's (y down from its top).
     main_height: f64,
@@ -113,11 +131,17 @@ impl Session {
             let layer = CALayer::new();
             view.setLayer(Some(&layer));
             view.setWantsLayer(true);
-            let len = (scr.bg.width() * scr.bg.height() * 4) as usize;
-            wins.push(Win { window, layer, screen: i, buf: vec![0; len], full: true });
+            // The bitmap is in pixels, the layer in points.
+            layer.setContentsScale(window.backingScaleFactor());
+            layer.setOpaque(true);
+            let (w, h) = (scr.bg.width(), scr.bg.height());
+            let surface = || -> Result<Surface> { Ok(Surface { surface: new_surface(w, h, &space)?, stale: None }) };
+            let surfaces = [surface()?, surface()?];
+            let len = (w * h * 4) as usize;
+            wins.push(Win { window, layer, screen: i, buf: vec![0; len], full: true, surfaces, back: 0 });
         }
 
-        let mut s = Self { mtm, app, editor, wins, space, main_height, current_cursor: None, scroll: 0.0, dirty: true };
+        let mut s = Self { mtm, app, editor, wins, main_height, current_cursor: None, scroll: 0.0, dirty: true };
         // Painted before they're shown, so the screen doesn't flash.
         s.draw()?;
         for w in &s.wins {
@@ -199,18 +223,31 @@ impl Session {
                 continue;
             }
             let win = &mut self.wins[i];
-            match rects {
+            match &rects {
                 None => {
                     if let Some(mut pm) = tiny_skia::PixmapMut::from_bytes(&mut win.buf, w, h) {
                         crate::editor::ui::render(&self.editor, scr_idx, &mut pm, (0, 0));
                     }
                 }
-                Some(rs) => paint_rects(&self.editor, scr_idx, &mut win.buf, w, &rs),
+                Some(rs) => paint_rects(&self.editor, scr_idx, &mut win.buf, w, rs),
             }
             win.full = false;
-            let img = bitmap(&win.buf, w, h, &self.space).context("creating the overlay image")?;
-            // A CGImage is what a layer's contents are documented to take.
-            unsafe { win.layer.setContents(Some(&*(&*img as *const CGImage as *const AnyObject))) };
+            for s in &mut win.surfaces {
+                match (&mut s.stale, &rects) {
+                    (Some(st), Some(rs)) => {
+                        st.extend_from_slice(rs);
+                        *st = merge(std::mem::take(st));
+                    }
+                    (st, _) => *st = None,
+                }
+            }
+            let s = &mut win.surfaces[win.back];
+            copy_to_surface(&s.surface, &win.buf, w, h, s.stale.as_deref())?;
+            s.stale = Some(Vec::new());
+            // A different object than the layer had, so Core Animation shows
+            // it without being told the contents changed.
+            unsafe { win.layer.setContents(Some(&*(&*s.surface as *const IOSurfaceRef as *const AnyObject))) };
+            win.back ^= 1;
         }
         CATransaction::commit();
         self.dirty = false;
@@ -304,28 +341,52 @@ fn paint_rects(ed: &Editor, idx: usize, buf: &mut [u8], w: u32, rs: &[IRect]) {
     }
 }
 
-/// An image of the bitmap as it is now. The copy is what lets the next frame
-/// be painted while the window server may still be reading this one.
-fn bitmap(buf: &[u8], w: u32, h: u32, space: &CGColorSpace) -> Option<CFRetained<CGImage>> {
-    let data = CFData::from_bytes(buf);
-    let provider = CGDataProvider::with_cf_data(Some(&data))?;
-    // Bytes B, G, R, then one unused: a little-endian 32-bit xRGB.
-    let info = CGBitmapInfo(CGImageAlphaInfo::NoneSkipFirst.0 | CGImageByteOrderInfo::Order32Little.0);
-    unsafe {
-        CGImage::new(
-            w as usize,
-            h as usize,
-            8,
-            32,
-            w as usize * 4,
-            Some(space),
-            info,
-            Some(&provider),
-            std::ptr::null(),
-            false,
-            CGColorRenderingIntent::RenderingIntentDefault,
-        )
+/// A BGRA surface the window server can show, tagged sRGB like the
+/// screenshots the editor paints.
+fn new_surface(w: u32, h: u32, space: &CGColorSpace) -> Result<CFRetained<IOSurfaceRef>> {
+    let num = |n: i32| CFNumber::new_i32(n);
+    let (width, height, bpe, format) = (num(w as i32), num(h as i32), num(4), num(i32::from_be_bytes(*b"BGRA")));
+    let keys: [&CFString; 4] = unsafe { [kIOSurfaceWidth, kIOSurfaceHeight, kIOSurfaceBytesPerElement, kIOSurfacePixelFormat] };
+    let props = CFDictionary::<CFString, CFNumber>::from_slices(&keys, &[&*width, &*height, &*bpe, &*format]);
+    let surface = unsafe { IOSurfaceRef::new(props.as_opaque()) }.context("creating an IOSurface")?;
+    if let Some(plist) = space.property_list() {
+        unsafe { surface.set_value(kIOSurfaceColorSpace, &plist) };
     }
+    Ok(surface)
+}
+
+/// Copy `rects` of `buf` (all of it for `None`) into `surface`, whose rows
+/// may be padded.
+fn copy_to_surface(surface: &IOSurfaceRef, buf: &[u8], w: u32, h: u32, rects: Option<&[IRect]>) -> Result<()> {
+    let all = [IRect { x: 0, y: 0, w: w as i32, h: h as i32 }];
+    let rects = rects.unwrap_or(&all);
+    if rects.is_empty() {
+        return Ok(());
+    }
+    let r = unsafe { surface.lock(IOSurfaceLockOptions::empty(), std::ptr::null_mut()) };
+    anyhow::ensure!(r == 0, "locking the IOSurface failed ({r})");
+    let stride = surface.bytes_per_row();
+    let (sw, sh) = (surface.width().min(w as usize), surface.height().min(h as usize));
+    let base = surface.base_address().as_ptr().cast::<u8>();
+    let src_stride = w as usize * 4;
+    for r in rects {
+        let x0 = (r.x.max(0) as usize).min(sw);
+        let x1 = ((r.x + r.w).max(0) as usize).min(sw);
+        let y0 = (r.y.max(0) as usize).min(sh);
+        let y1 = ((r.y + r.h).max(0) as usize).min(sh);
+        let n = (x1 - x0) * 4;
+        if n == 0 {
+            continue;
+        }
+        for y in y0..y1 {
+            let src = &buf[y * src_stride + x0 * 4..][..n];
+            // In bounds: x1 <= width and y < height, and each row is
+            // `stride` >= width * 4 bytes.
+            unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), base.add(y * stride + x0 * 4), n) };
+        }
+    }
+    unsafe { surface.unlock(IOSurfaceLockOptions::empty(), std::ptr::null_mut()) };
+    Ok(())
 }
 
 /// The editor's key for a key press: special keys by their (layout
