@@ -6,6 +6,9 @@ All notable changes are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- The Copy button's tooltip shows Ctrl+C rather than Enter (both still copy).
+
 ## [0.6.1] - 2026-11-03
 
 ### Added

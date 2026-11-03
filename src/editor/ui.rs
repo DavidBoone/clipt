@@ -1023,7 +1023,7 @@ fn tooltip(ed: &Editor, b: Button) -> String {
         Button::Undo => "Undo  Ctrl+Z".into(),
         Button::Redo => "Redo  Ctrl+Shift+Z".into(),
         Button::Save => "Save  Ctrl+S".into(),
-        Button::Copy => "Copy  Enter".into(),
+        Button::Copy => "Copy  Ctrl+C".into(),
         Button::Close => "Cancel  Esc".into(),
         Button::Record => "Record  Enter".into(),
         Button::SystemSound => format!("Computer sound: {}  S", on(ed.sound.system)),
