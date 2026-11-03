@@ -56,16 +56,29 @@ ffmpeg's `h264_videotoolbox` encoder, the writer and camera as they are;
 microphone, fed to the writer as PulseAudio is now.
 
 **5. Release.** A universal tarball on GitHub releases, and `clipt update`
-for it. Signing and notarisation need the Apple Developer Program (US$99 a
-year); without it, a downloaded binary needs its quarantine flag cleared
-(see the README).
+for it, signed and notarised as the CI build already is.
+
+## Signing
+
+The `macos` CI job signs the binary with the project's Developer ID
+(hardened runtime, secure timestamp) and has Apple notarise it, so
+Gatekeeper lets a downloaded copy run. It needs five repository secrets:
+`MACOS_CERT_P12` (the Developer ID Application certificate and its key, as
+base64), `MACOS_CERT_PASSWORD`, and the App Store Connect API key used for
+notarisation, `MACOS_NOTARY_KEY` (the `.p8` file's text),
+`MACOS_NOTARY_KEY_ID` and `MACOS_NOTARY_ISSUER`. Without them (pull
+requests from forks), the build is ad-hoc signed and a downloaded copy
+needs `xattr -d com.apple.quarantine clipt` before it runs. A bare binary
+can't carry its notarisation ticket, so the first run checks with Apple
+online.
 
 ## Testing
 
 CI can't show a screen to anyone, so phase 1 needs a person with a Mac:
 
 1. Download `clipt-macos` from the latest run of the `macos` CI job, unzip
-   it, then `xattr -d com.apple.quarantine clipt` and `chmod +x clipt`.
+   it, and `chmod +x clipt`. (An ad-hoc signed build, from a run without
+   the signing secrets, also needs `xattr -d com.apple.quarantine clipt`.)
 2. `./clipt --version` and `./clipt list`: each display, with its size.
 3. `./clipt full -o test.png`: the first time, macOS asks to allow Screen
    Recording for the terminal; allow it, quit and reopen the terminal, run
