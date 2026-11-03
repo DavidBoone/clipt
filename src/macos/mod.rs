@@ -1,10 +1,11 @@
-//! clipt on macOS: screenshots, with the same editor as on Linux. Recording,
-//! the menu bar icon and `clipt update` aren't there yet; see
+//! clipt on macOS: screenshots, with the same editor as on Linux, and the
+//! menu bar icon. Recording and `clipt update` aren't there yet; see
 //! docs/macos-plan.md.
 
 mod capture;
 mod clipboard;
 mod overlay;
+mod tray;
 mod windows;
 
 use crate::config::Config;
@@ -21,6 +22,7 @@ USAGE:
     clipt full            Capture the whole desktop
     clipt screen [NAME]   Capture one display (default: the main one)
     clipt list            Show the displays
+    clipt tray            Menu bar icon, with the shortcuts (what opening clipt.app does)
 
 OPTIONS:
     -o, --output PATH     Write the PNG to PATH ('-' for stdout) instead of the save dir
@@ -41,15 +43,22 @@ EDITOR KEYS:
     ⌘Z / ⌘⇧Z              undo / redo     Esc / right-click  cancel / back
 
 Config: ~/.config/clipt/config.toml (save_dir, filename, color, palette, width,
-copy_on_save, notify, cursor, font).
+copy_on_save, notify, cursor, font, hotkey, hotkey_full). hotkey is the
+tray's shortcut for a region, default \"cmd+shift+2\"; \"\" turns it off.
 clipt needs the Screen Recording permission (System Settings > Privacy &
 Security) for the app it runs from.
 ";
 
 pub fn run(args: Args, cfg: Config) -> Result<()> {
+    // Opened as clipt.app (Finder, Spotlight, Login Items), with nothing on
+    // the command line: the menu bar icon.
+    let opened_as_app = std::env::args_os().len() == 1 && objc2_foundation::NSBundle::mainBundle().bundleIdentifier().is_some();
+    if args.cmd == "tray" || opened_as_app {
+        return tray::run(&cfg);
+    }
     match args.cmd.as_str() {
         "gui" | "full" | "screen" | "list" => {}
-        "record" | "tray" | "update" | "gnome-extension" => bail!("`clipt {}` isn't available on macOS yet", args.cmd),
+        "record" | "update" | "gnome-extension" => bail!("`clipt {}` isn't available on macOS yet", args.cmd),
         other => bail!("unknown command '{other}' (try --help)"),
     }
     if args.backend.is_some() {
