@@ -5,9 +5,11 @@ name: release
 #     `gh workflow run release -f version=0.2.0`): tests, bumps Cargo.toml,
 #     dates the CHANGELOG, commits, tags and releases.
 #   * Push a tag like v0.2.0 yourself, after bumping by hand.
-# Either way: x86_64 and aarch64 tarballs, .deb and .rpm, a published GitHub
-# release (prerelease for tags like v0.2.0-rc1) with that version's CHANGELOG
-# section as notes, and crates.io when a CARGO_REGISTRY_TOKEN is configured.
+# Either way: x86_64 and aarch64 tarballs, .deb and .rpm, a universal macOS
+# tarball (signed and notarised, with the secrets docs/macos-plan.md lists),
+# a published GitHub release (prerelease for tags like v0.2.0-rc1) with that
+# version's CHANGELOG section as notes, and crates.io when a
+# CARGO_REGISTRY_TOKEN is configured.
 on:
   push:
     tags: ["v*"]
@@ -114,8 +116,53 @@ jobs:
             clipt*.deb
             clipt*.rpm
 
+  # One universal binary (Apple silicon and Intel), signed with the
+  # Developer ID and notarised, as the macos CI job builds it. No install.sh:
+  # it's for Linux desktops.
+  macos:
+    needs: prepare
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create -output dist/clipt target/aarch64-apple-darwin/release/clipt target/x86_64-apple-darwin/release/clipt
+      - name: sign and notarise
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
+        run: |
+          if [ -z "$MACOS_CERT_P12" ]; then echo "::error::no macOS signing secrets"; exit 1; fi
+          .github/scripts/macos-sign.sh dist/clipt 30m
+      - run: dist/clipt --version
+      - name: pack
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          name="clipt-${TAG}-universal-macos"
+          mkdir -p "$name"
+          cp dist/clipt data/clipt.1 README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "$name/"
+          cp data/completions/clipt.bash data/completions/_clipt data/completions/clipt.fish "$name/"
+          tar czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: clipt-*.tar.gz*
+
   release:
-    needs: [prepare, build]
+    needs: [prepare, build, macos]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

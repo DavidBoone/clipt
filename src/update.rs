@@ -157,16 +157,18 @@ pub fn newer(candidate: &str, current: &str) -> bool {
     }
 }
 
-fn arch() -> &'static str {
-    std::env::consts::ARCH
+/// The release tarball for this machine: one per architecture on Linux, one
+/// universal binary for both kinds of Mac.
+fn platform() -> String {
+    if cfg!(target_os = "macos") { "universal-macos".into() } else { format!("{}-linux", std::env::consts::ARCH) }
 }
 
 /// Download `r`'s tarball for this machine, verify its checksum and swap
 /// the binary at `exe` for the new one. Returns the new binary's path.
 pub fn install(r: &Release, exe: &Path) -> Result<PathBuf> {
-    let name = format!("clipt-{}-{}-linux.tar.gz", r.tag_name, arch());
+    let name = format!("clipt-{}-{}.tar.gz", r.tag_name, platform());
     let find = |n: &str| r.assets.iter().find(|a| a.name == n).map(|a| a.browser_download_url.clone());
-    let url = find(&name).with_context(|| format!("release {} has no build for {}", r.tag_name, arch()))?;
+    let url = find(&name).with_context(|| format!("release {} has no build for {}", r.tag_name, platform()))?;
     let sum_url = find(&format!("{name}.sha256")).context("release has no checksum file")?;
 
     let dir = exe.parent().context("binary has no parent directory")?;
@@ -209,8 +211,10 @@ fn tempdir(near: &Path) -> Result<PathBuf> {
 }
 
 fn sha256(p: &Path) -> Result<String> {
-    let out = Command::new("sha256sum").arg(p).output().context("running sha256sum")?;
-    anyhow::ensure!(out.status.success(), "sha256sum failed");
+    // macOS has no sha256sum; its shasum prints the same format.
+    let (cmd, args): (&str, &[&str]) = if cfg!(target_os = "macos") { ("shasum", &["-a", "256"]) } else { ("sha256sum", &[]) };
+    let out = Command::new(cmd).args(args).arg(p).output().with_context(|| format!("running {cmd}"))?;
+    anyhow::ensure!(out.status.success(), "{cmd} failed");
     Ok(String::from_utf8(out.stdout)?.split_whitespace().next().unwrap_or_default().to_lowercase())
 }
 

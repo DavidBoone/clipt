@@ -55,8 +55,9 @@ ffmpeg's `h264_videotoolbox` encoder, the writer and camera as they are;
 **4. Sound.** ScreenCaptureKit's system audio (macOS 13+) and the
 microphone, fed to the writer as PulseAudio is now.
 
-**5. Release.** A universal tarball on GitHub releases, and `clipt update`
-for it, signed and notarised as the CI build already is.
+**5. Release.** Done ahead of the others: the release workflow adds a
+signed and notarised universal tarball (`clipt-vX.Y.Z-universal-macos.tar.gz`)
+to each GitHub release, and `clipt update` installs it.
 
 ## Signing
 
