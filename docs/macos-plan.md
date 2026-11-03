@@ -72,6 +72,11 @@ needs `xattr -d com.apple.quarantine clipt` before it runs. A bare binary
 can't carry its notarisation ticket, so the first run checks with Apple
 online.
 
+The job waits at most ten minutes for Apple, then uploads the signed build
+with a warning naming the submission. To see where a submission stands,
+run the `notary` workflow (Actions → notary → Run workflow), with or
+without a submission id.
+
 ## Testing
 
 CI can't show a screen to anyone, so phase 1 needs a person with a Mac:

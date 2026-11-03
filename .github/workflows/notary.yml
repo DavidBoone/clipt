@@ -1,0 +1,40 @@
+name: notary
+
+# What Apple's notary service says about the macOS builds CI sent it:
+# Actions → notary → Run workflow (or `gh workflow run notary`). Without a
+# submission id it lists the recent submissions and their status; with
+# one, it shows that submission and Apple's log of what it checked, which
+# says why if it was rejected. Uses the same secrets as the macos CI job.
+on:
+  workflow_dispatch:
+    inputs:
+      submission:
+        description: "Submission id (from the macos job's log); empty lists recent ones"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  status:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - env:
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
+          SUBMISSION: ${{ inputs.submission }}
+        run: |
+          printf '%s\n' "$MACOS_NOTARY_KEY" > "$RUNNER_TEMP/notary.p8"
+          trap 'rm -f "$RUNNER_TEMP/notary.p8"' EXIT
+          auth=(--key "$RUNNER_TEMP/notary.p8" --key-id "$MACOS_NOTARY_KEY_ID" --issuer "$MACOS_NOTARY_ISSUER")
+          if [ -z "$SUBMISSION" ]; then
+            xcrun notarytool history "${auth[@]}"
+          else
+            # Checked against Apple's format, since it comes from a form.
+            [[ "$SUBMISSION" =~ ^[0-9a-fA-F-]{36}$ ]] || { echo "::error::not a submission id: $SUBMISSION"; exit 1; }
+            xcrun notarytool info "$SUBMISSION" "${auth[@]}"
+            xcrun notarytool log "$SUBMISSION" "${auth[@]}" || echo "No log yet: Apple writes it when the submission finishes."
+          fi
