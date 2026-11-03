@@ -242,6 +242,8 @@ pub struct Editor {
     pub record: bool,
     /// Record mode: which sound to record with it, toggled in the toolbar.
     pub sound: SoundToggles,
+    /// Record mode: save a GIF rather than an MP4 (G, or its button).
+    pub gif: bool,
     /// The screenshot overlay may switch to record mode and back (Ctrl+R or
     /// the toolbar). `clipt record`'s picker can't: it only records.
     pub can_switch: bool,
@@ -296,6 +298,7 @@ impl Editor {
             outcome: None,
             record: false,
             sound: SoundToggles::default(),
+            gif: false,
             can_switch: false,
             last_click: None,
             width_hint: false,
@@ -976,6 +979,10 @@ impl Editor {
                 self.sound.mic = !self.sound.mic;
                 return true;
             }
+            Key::Char('g' | 'G') if !mods.ctrl => {
+                self.gif = !self.gif;
+                return true;
+            }
             Key::Escape | Key::Enter | Key::Tab | Key::Left | Key::Right | Key::Up | Key::Down => {}
             Key::Char('a' | 'A') if mods.ctrl => {}
             _ => return false,
@@ -996,6 +1003,7 @@ impl Editor {
             ui::Button::Record => self.outcome = Some(Outcome::Record),
             ui::Button::SystemSound => self.sound.system = !self.sound.system,
             ui::Button::Mic => self.sound.mic = !self.sound.mic,
+            ui::Button::Gif => self.gif = !self.gif,
             ui::Button::RecordMode | ui::Button::ShotMode => self.switch_mode(),
             ui::Button::Tool(t) => self.set_tool(t),
             ui::Button::Color(i) => self.set_color(i),
@@ -1359,7 +1367,7 @@ mod tests {
         assert!(ed.record);
         assert_eq!(
             buttons(&ed),
-            vec![ui::Button::Record, ui::Button::SystemSound, ui::Button::Mic, ui::Button::ShotMode, ui::Button::Close]
+            vec![ui::Button::Record, ui::Button::SystemSound, ui::Button::Mic, ui::Button::Gif, ui::Button::ShotMode, ui::Button::Close]
         );
         ed.key(Key::Char('s'), Mods::default());
         assert!(ed.sound.system, "the sound toggles work once switched");
@@ -1413,7 +1421,7 @@ mod tests {
         let (_, buttons) = ui::toolbar_layout(&ed).unwrap();
         assert_eq!(
             buttons.iter().map(|b| b.1).collect::<Vec<_>>(),
-            vec![ui::Button::Record, ui::Button::SystemSound, ui::Button::Mic, ui::Button::Close]
+            vec![ui::Button::Record, ui::Button::SystemSound, ui::Button::Mic, ui::Button::Gif, ui::Button::Close]
         );
         // The sound toggles: S and M, or their buttons.
         assert_eq!(ed.sound, SoundToggles::default());
@@ -1421,6 +1429,10 @@ mod tests {
         assert_eq!(ed.sound, SoundToggles { system: true, mic: true });
         ed.press_button(ui::Button::Mic);
         assert_eq!(ed.sound, SoundToggles { system: true, mic: false });
+        // G, or its button, makes it a GIF.
+        assert!(!ed.gif && ed.key(Key::Char('g'), Mods::default()) && ed.gif);
+        ed.press_button(ui::Button::Gif);
+        assert!(!ed.gif);
         assert_eq!(ed.outcome, None, "toggling doesn't start or cancel anything");
         ed.key(Key::Enter, Mods::default());
         assert_eq!(ed.outcome, Some(Outcome::Record));
@@ -1965,6 +1977,20 @@ mod tests {
         });
         step(&mut ed, &|e| {
             e.key(Key::Enter, m);
+        });
+        // Record mode's toggles redraw the toolbar.
+        let ctrl = Mods { ctrl: true, ..m };
+        step(&mut ed, &|e| {
+            e.can_switch = true;
+            e.key(Key::Char('r'), ctrl);
+        });
+        for k in ['s', 'm', 'g', 'g'] {
+            step(&mut ed, &|e| {
+                e.key(Key::Char(k), m);
+            });
+        }
+        step(&mut ed, &|e| {
+            e.key(Key::Char('r'), ctrl);
         });
         // hover the toolbar to get a tooltip, then leave
         let (_, btns) = ui::toolbar_layout(&ed).unwrap();

@@ -277,6 +277,11 @@ the live screen.
 .TP
 \fBS\fR, \fBM\fR (record mode)
 Turn the computer's sound and the microphone on or off for this recording.
+.TP
+\fBG\fR (record mode)
+Save the recording as a GIF rather than an MP4, or back. It starts as
+\fB\-\-gif\fR or \fBrecord_format\fR says, and flipping it sets
+\fBrecord_format\fR for next time. A GIF has no sound.
 .SH CONFIGURATION
 Settings live in \fIconfig.toml\fR under \fI$XDG_CONFIG_HOME/clipt\fR
 (\fI~/.config/clipt\fR when \fBXDG_CONFIG_HOME\fR is unset).

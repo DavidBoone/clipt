@@ -126,7 +126,8 @@ backs out a step.
 
 To record a video instead, click **Video** at the bottom of the screen (or
 press **Ctrl+R**), select, toggle sound with **S** and the microphone with
-**M**, and press **Enter**; stop it from the tray or with `clipt record --stop`.
+**M**, choose a GIF with **G** (remembered for next time), and press
+**Enter**; stop it from the tray or with `clipt record --stop`.
 
 `clipt tray` puts an icon in the system tray (StatusNotifierItem: KDE, waybar,
 GNOME with the AppIndicator extension, Xfce, …). Left-click captures a region,

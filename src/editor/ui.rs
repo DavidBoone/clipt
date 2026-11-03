@@ -21,6 +21,8 @@ pub enum Button {
     SystemSound,
     /// Record mode: toggle the microphone.
     Mic,
+    /// Record mode: a GIF instead of an MP4.
+    Gif,
     /// Screenshot mode: switch to recording the selection instead.
     RecordMode,
     /// Record mode, from the screenshot overlay: back to a screenshot.
@@ -41,6 +43,7 @@ impl Button {
             Button::Mic => 8,
             Button::RecordMode => 9,
             Button::ShotMode => 10,
+            Button::Gif => 11,
         }
     }
 }
@@ -79,7 +82,14 @@ enum Item {
 
 fn items(ed: &Editor) -> Vec<Item> {
     if ed.record {
-        let mut v = vec![Item::Btn(Button::Record), Item::Sep, Item::Btn(Button::SystemSound), Item::Btn(Button::Mic), Item::Sep];
+        let mut v = vec![
+            Item::Btn(Button::Record),
+            Item::Sep,
+            Item::Btn(Button::SystemSound),
+            Item::Btn(Button::Mic),
+            Item::Btn(Button::Gif),
+            Item::Sep,
+        ];
         if ed.can_switch {
             v.push(Item::Btn(Button::ShotMode));
         }
@@ -265,7 +275,8 @@ pub fn dynamic_layers(ed: &Editor, frame: u64) -> Vec<Layer> {
     };
     let tk = rect_key(tb);
     let rects = tb.and_then(|panel| Rect::from_ltrb(panel.left() - 80.0, panel.top() - 40.0, panel.right() + 80.0, panel.bottom() + 40.0));
-    let mut parts = vec![tk[0], tk[1], tk[2], tk[3], hk, ed.tool as u8 as f32, ed.color as f32];
+    let toggles = [ed.record, ed.sound.system, ed.sound.mic, ed.gif].iter().fold(0, |k, &b| k * 2 + b as u8);
+    let mut parts = vec![tk[0], tk[1], tk[2], tk[3], hk, ed.tool as u8 as f32, ed.color as f32, toggles as f32];
     parts.extend(ed.palette.iter().map(|&(r, g, b)| u32::from_be_bytes([0, r, g, b]) as f32));
     layers.push(Layer { key: key(&parts), rects: grow(vec![rects]) });
 
@@ -824,8 +835,10 @@ fn draw_toolbar(ed: &Editor, pm: &mut PixmapMut, view: &View, panel: Rect, btns:
             _ => {
                 let active = match b {
                     Button::Tool(t) => t == ed.tool,
-                    Button::SystemSound => ed.sound.system,
-                    Button::Mic => ed.sound.mic,
+                    // A GIF has no sound, so its toggles show off.
+                    Button::SystemSound => ed.sound.system && !ed.gif,
+                    Button::Mic => ed.sound.mic && !ed.gif,
+                    Button::Gif => ed.gif,
                     _ => false,
                 };
                 let inset = Rect::from_xywh(r.left() + 1.0, r.top() + 1.0, r.width() - 2.0, r.height() - 2.0).unwrap();
@@ -849,7 +862,7 @@ fn draw_toolbar(ed: &Editor, pm: &mut PixmapMut, view: &View, panel: Rect, btns:
                 };
                 icon(ed, pm, view, r, b, fg);
                 // A sound toggle that's off is struck through.
-                if (b == Button::SystemSound && !ed.sound.system) || (b == Button::Mic && !ed.sound.mic) {
+                if matches!(b, Button::SystemSound | Button::Mic) && !active {
                     strike(pm, view, r, fg);
                 }
             }
@@ -1026,8 +1039,10 @@ fn tooltip(ed: &Editor, b: Button) -> String {
         Button::Copy => "Copy  Ctrl+C".into(),
         Button::Close => "Cancel  Esc".into(),
         Button::Record => "Record  Enter".into(),
+        Button::SystemSound | Button::Mic if ed.gif => "No sound in a GIF".into(),
         Button::SystemSound => format!("Computer sound: {}  S", on(ed.sound.system)),
         Button::Mic => format!("Microphone: {}  M", on(ed.sound.mic)),
+        Button::Gif => format!("Save as GIF: {}  G", on(ed.gif)),
         Button::RecordMode => "Record video  Ctrl+R".into(),
         Button::ShotMode => "Screenshot instead  Ctrl+R".into(),
     }
@@ -1208,6 +1223,13 @@ fn icon(ed: &Editor, pm: &mut PixmapMut, view: &View, r: Rect, b: Button, fg: Co
             line(&mut pb, &[(6.0, 11.0), (6.5, 14.5), (8.5, 17.4), (12.0, 18.8), (15.5, 17.4), (17.5, 14.5), (18.0, 11.0)]);
             line(&mut pb, &[(12.0, 18.8), (12.0, 21.0)]);
             line(&mut pb, &[(8.5, 21.0), (15.5, 21.0)]);
+        }
+        Button::Gif => {
+            let fs = 10.5;
+            let w = text::measure(ed.fonts.bold(), fs * s, "GIF") / s;
+            let h = text::line_height(ed.fonts.bold(), fs * s) / s;
+            line(&mut pb, &[(3.0, 6.0), (21.0, 6.0), (21.0, 18.0), (3.0, 18.0), (3.0, 6.0)]);
+            label(ed, pm, view, (ox + 12.0 * k - w / 2.0, oy + 12.0 * k - h / 2.0), fs, "GIF", fg, true);
         }
         Button::Color(_) => {}
     }

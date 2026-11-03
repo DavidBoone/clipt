@@ -11,9 +11,18 @@ All notable changes are listed here. The format follows
   `clipt config KEY` shows one and `clipt config KEY VALUE` sets it (for
   example `clipt config record_format gif`), keeping the file's comments
   and other keys, and refusing values the setting can't take.
+- A GIF toggle in the Video toolbar (G): it starts from `record_format`,
+  and flipping it saves `record_format`, so the next recording, from Print
+  Screen, the tray or `clipt record`, follows it.
 
 ### Changed
 - The Copy button's tooltip shows Ctrl+C rather than Enter (both still copy).
+
+### Fixed
+- `--gif` was ignored for a recording started from the screenshot overlay's
+  Video mode.
+- Turning the sound or microphone on or off with S or M didn't redraw their
+  toolbar buttons until something else changed.
 
 ## [0.6.1] - 2026-11-03
 

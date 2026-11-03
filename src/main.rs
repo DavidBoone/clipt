@@ -333,6 +333,7 @@ fn run() -> Result<()> {
         std::thread::sleep(std::time::Duration::from_secs_f64(args.delay));
     }
     if args.cmd == "record" {
+        let mut gif = args.gif.then_some(true);
         let target = match (args.record_mode.as_deref(), &args.geometry) {
             (_, Some(g)) => record::Target::Geometry(g.clone()),
             (Some("screen"), None) => record::Target::Screen(args.screen.clone()),
@@ -347,8 +348,9 @@ fn run() -> Result<()> {
             }
             (None | Some("region" | "window"), None) => {
                 let (system, mic) = record::audio::Source::toggles(&audio);
-                match pick_recording_area(&cfg, cursor, backend, editor::SoundToggles { system, mic })? {
-                    Some((t, s)) => {
+                match pick_recording_area(&cfg, &args, cursor, backend, editor::SoundToggles { system, mic })? {
+                    Some((t, s, g)) => {
+                        gif = Some(g);
                         let had = !audio.is_empty();
                         audio = record::audio::Source::with_toggles(audio, s.system, s.mic);
                         if !had && !audio.is_empty() {
@@ -362,17 +364,8 @@ fn run() -> Result<()> {
             (Some(m), None) => bail!("unknown recording mode '{m}' (screen, region, or -g GEOM)"),
         };
         let separate_audio = args.separate_audio || cfg.record_separate_audio;
-        let opts = record::Options {
-            target,
-            output: args.output.clone(),
-            fps: args.fps,
-            cursor,
-            backend,
-            gif: args.gif,
-            audio,
-            separate_audio,
-            balance,
-        };
+        let opts =
+            record::Options { target, output: args.output.clone(), fps: args.fps, cursor, backend, gif, audio, separate_audio, balance };
         return record::run(&cfg, opts);
     }
 
@@ -482,6 +475,7 @@ fn gui(cfg: &Config, args: &Args, mut ed: Editor, kind: capture::DisplayKind, ba
     // with the sound the settings would record.
     ed.can_switch = true;
     ed.palette = cfg.palette_rgb();
+    ed.gif = wants_gif(cfg, args);
     let audio = record::audio::Source::parse(args.audio.as_deref().unwrap_or(&cfg.record_audio)).unwrap_or_default();
     let (system, mic) = record::audio::Source::toggles(&audio);
     ed.sound = editor::SoundToggles { system, mic };
@@ -489,6 +483,7 @@ fn gui(cfg: &Config, args: &Args, mut ed: Editor, kind: capture::DisplayKind, ba
     let mut session = session::open(ed, kind)?;
     lap("surfaces");
     let outcome = session.run()?;
+    remember_gif(cfg, args, session.editor());
     if session.editor().palette_changed
         && let Err(e) = Config::save_palette(&session.editor().palette)
     {
@@ -500,11 +495,12 @@ fn gui(cfg: &Config, args: &Args, mut ed: Editor, kind: capture::DisplayKind, ba
     if outcome == Outcome::Record {
         let target = recording_target(session.editor())?;
         let sound = session.editor().sound;
+        let gif = session.editor().gif;
         session.hide()?;
         drop(session);
         // Let the compositor take the overlay down before the first frame.
         std::thread::sleep(std::time::Duration::from_millis(150));
-        return record_picked(cfg, args, target, audio, sound, args.cursor || cfg.cursor, backend);
+        return record_picked(cfg, args, target, audio, sound, gif, backend);
     }
     let img = session.editor().export().context("nothing selected")?;
 
@@ -555,15 +551,16 @@ fn list_sound() -> Result<()> {
 }
 
 /// The overlay in record mode: what to record (an area, or a window picked
-/// with a click) and the sound toggles as the user left them (starting from
-/// `sound`), or None if cancelled.
+/// with a click), and the sound toggles (starting from `sound`) and GIF
+/// toggle as the user left them, or None if cancelled.
 #[cfg(not(target_os = "macos"))]
 fn pick_recording_area(
     cfg: &Config,
+    args: &Args,
     cursor: bool,
     backend: Option<Backend>,
     sound: editor::SoundToggles,
-) -> Result<Option<(record::Target, editor::SoundToggles)>> {
+) -> Result<Option<(record::Target, editor::SoundToggles, bool)>> {
     let font_path = cfg.font.clone();
     let fonts = std::thread::spawn(move || text::Fonts::load(font_path.as_deref()));
     let mut cap = Capturer::new()?;
@@ -578,18 +575,40 @@ fn pick_recording_area(
     let mut ed = Editor::new(shots, fonts, true, cfg.color.saturating_sub(1), cfg.width);
     ed.record = true;
     ed.sound = sound;
+    ed.gif = wants_gif(cfg, args);
     ed.windows = wins.join().unwrap_or_default();
     let mut session = session::open(ed, kind)?;
-    if session.run()? != Outcome::Record {
+    let outcome = session.run()?;
+    remember_gif(cfg, args, session.editor());
+    if outcome != Outcome::Record {
         return Ok(None);
     }
     let target = recording_target(session.editor())?;
     let sound = session.editor().sound;
+    let gif = session.editor().gif;
     session.hide()?;
     drop(session);
     // Let the compositor take the overlay down before the first frame.
     std::thread::sleep(std::time::Duration::from_millis(150));
-    Ok(Some((target, sound)))
+    Ok(Some((target, sound, gif)))
+}
+
+/// Whether a recording starts out as a GIF: `--gif`, or `record_format`.
+#[cfg(not(target_os = "macos"))]
+fn wants_gif(cfg: &Config, args: &Args) -> bool {
+    args.gif || cfg.record_format == "gif"
+}
+
+/// The overlay's GIF toggle is remembered: when it was flipped, it becomes
+/// `record_format`, so the tray, `clipt record` and the next Print Screen
+/// follow it.
+#[cfg(not(target_os = "macos"))]
+fn remember_gif(cfg: &Config, args: &Args, ed: &Editor) {
+    if ed.gif != wants_gif(cfg, args)
+        && let Err(e) = Config::set("record_format", if ed.gif { "gif" } else { "mp4" })
+    {
+        eprintln!("clipt: saving record_format: {e:#}");
+    }
 }
 
 /// What a record-mode overlay picked: the window clicked, or the area.
@@ -611,9 +630,10 @@ fn record_picked(
     target: record::Target,
     audio: Vec<record::audio::Source>,
     sound: editor::SoundToggles,
-    cursor: bool,
+    gif: bool,
     backend: Option<Backend>,
 ) -> Result<()> {
+    let cursor = args.cursor || cfg.cursor;
     record::ensure_idle()?;
     let audio = record::audio::Source::with_toggles(audio, sound.system, sound.mic);
     if !audio.is_empty() {
@@ -626,7 +646,7 @@ fn record_picked(
         fps: args.fps,
         cursor,
         backend,
-        gif: false,
+        gif: Some(gif),
         audio,
         separate_audio: args.separate_audio || cfg.record_separate_audio,
         balance,

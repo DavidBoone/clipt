@@ -82,8 +82,9 @@ pub struct Options {
     pub fps: Option<u32>,
     pub cursor: bool,
     pub backend: Option<Backend>,
-    /// Save a GIF (also chosen by a `.gif` output name or `record_format`).
-    pub gif: bool,
+    /// GIF or not, over `record_format`: from `--gif` or the overlay's
+    /// toggle. A `.gif` output name also makes a GIF.
+    pub gif: Option<bool>,
     /// Sound to record alongside, mixed at each source's volume.
     pub audio: Vec<audio::Source>,
     /// Also keep each source as its own sound track.
@@ -360,10 +361,10 @@ pub fn run(cfg: &Config, opts: Options) -> Result<()> {
     };
     let interval = Duration::from_secs_f64(1.0 / fps as f64);
 
-    let gif_format = match cfg.record_format.as_str() {
-        "mp4" => opts.gif,
-        "gif" => true,
-        other => bail!("unknown record_format '{other}' (mp4, gif)"),
+    let gif_format = match (opts.gif, cfg.record_format.as_str()) {
+        (_, other) if !matches!(other, "mp4" | "gif") => bail!("unknown record_format '{other}' (mp4, gif)"),
+        (Some(g), _) => g,
+        (None, f) => f == "gif",
     };
     let path = match &opts.output {
         Some(p) => crate::config::expand(p),
