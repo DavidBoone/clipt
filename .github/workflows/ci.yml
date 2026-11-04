@@ -143,6 +143,33 @@ jobs:
           name: clipt-macos
           path: dist/
 
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # The examples are the Linux end-to-end tests' input driver and window.
+      - run: cargo clippy --bins --tests --locked -- -D warnings
+      - run: cargo test --locked --bins
+      - run: cargo build --release --locked
+      # The runner has a desktop session, so GDI can capture it.
+      - shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/clipt.exe dist/
+          dist/clipt.exe --version
+          dist/clipt.exe list
+          dist/clipt.exe full -o dist/full.png
+          file dist/full.png
+      - uses: actions/upload-artifact@v7
+        with:
+          name: clipt-windows
+          path: dist/
+
   nix:
     runs-on: ubuntu-latest
     timeout-minutes: 20

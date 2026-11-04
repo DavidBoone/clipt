@@ -1,7 +1,7 @@
 # Notes for coding agents
 
-clipt is a screenshot and screen-recording tool for Wayland and X11, with a
-macOS port under way: one Rust binary, no GUI toolkit. Read `CONTRIBUTING.md` for the full check list; this
+clipt is a screenshot and screen-recording tool for Wayland and X11, with
+macOS and Windows ports under way: one Rust binary, no GUI toolkit. Read `CONTRIBUTING.md` for the full check list; this
 file says which checks matter for which change, and the house style.
 
 ## Where things are
@@ -12,9 +12,13 @@ file says which checks matter for which change, and the house style.
 - `src/editor/`: selection, annotation and the toolbar; knows nothing about
   Wayland. `src/overlay.rs` and `src/x11/` host it on screen.
 - `src/record/`: `clipt record` (writer, encoder, camera, frame indicator).
-- `src/macos/`: the macOS host (capture, overlay, pasteboard, window list);
-  everything Linux-only is behind `cfg(not(target_os = "macos"))`. Plan and
-  status in `docs/macos-plan.md`.
+- `src/macos/`: the macOS host (capture, overlay, pasteboard, window list).
+  Plan and status in `docs/macos-plan.md`.
+- `src/win32/`: the Windows host (GDI capture, overlay, clipboard, window
+  list). Plan and status in `docs/windows-plan.md`.
+- Everything Wayland/X11-only is behind `cfg(wayland_x11)` (set by
+  `build.rs` for every Unix but macOS; `Cargo.toml` spells it
+  `cfg(all(unix, not(target_os = "macos")))`).
 - `src/tray.rs`, `src/update.rs`, `src/config.rs`, `src/main.rs` (CLI).
 - `tests/`: end-to-end suites per desktop, run in Docker by `tests/e2e.sh`.
   `examples/vinput.rs` and `examples/testwin.rs` are their input driver and
@@ -35,6 +39,7 @@ what the change can break:
 | Capture, overlay, editor input, recording, clipboard | also the matching `tests/e2e.sh IMAGE LAYOUT` suite (needs Docker), e.g. `tests/e2e.sh sway single` |
 | Dependencies (`Cargo.toml`, `Cargo.lock`) | also `cargo deny check` and `packaging/flatpak/cargo-sources.py` (commit the regenerated `cargo-sources.json`) |
 | Code behind the `pipewire` feature, or `#[cfg]`s | also `cargo clippy --no-default-features --all-targets -- -D warnings` |
+| `src/win32/`, or anything shared with it | also `cargo clippy --target x86_64-pc-windows-msvc --bins --tests -- -D warnings` (type-checks from Linux; `rustup target add x86_64-pc-windows-msvc`). CI's `windows` job runs the tests |
 | `src/macos/`, or anything shared with it | also `cargo clippy --target aarch64-apple-darwin --bins --tests -- -D warnings` (type-checks from Linux; `rustup target add aarch64-apple-darwin`). Only CI's `macos` job, or a Mac, runs the tests: `cargo test --bins`, since the examples are Linux-only |
 
 Notes:

@@ -17,6 +17,9 @@ All notable changes are listed here. The format follows
 - The tray menu ticks *Record as GIF*, *Copy when saving* and
   *Notifications*, saved in the config, and *Settings…* opens the config
   file. The macOS menu bar has the last three.
+- An early Windows build: screenshots with the same editor (select,
+  annotate, copy, save), `clipt full` and `clipt screen`, on Windows 10 and
+  11. No tray, hotkey or recording yet.
 
 ### Changed
 - The Copy button's tooltip shows Ctrl+C rather than Enter (both still copy).

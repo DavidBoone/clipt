@@ -1744,13 +1744,8 @@ mod tests {
                         if x1 <= x0 || y1 <= y0 {
                             continue;
                         }
-                        let mut tmp = Pixmap::new((x1 - x0) as u32, (y1 - y0) as u32).unwrap();
-                        ui::render(ed, 0, &mut tmp.as_mut(), (x0, y0));
-                        let row = (x1 - x0) as usize * 4;
-                        for (y, src) in tmp.data().chunks_exact(row).enumerate() {
-                            let off = ((y0 as usize + y) * 640 + x0 as usize) * 4;
-                            buf.data_mut()[off..off + row].copy_from_slice(src);
-                        }
+                        let r = damage::IRect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+                        damage::repaint(ed, 0, buf.data_mut(), 640, 400, r);
                     }
                 }
             }
@@ -1759,13 +1754,24 @@ mod tests {
             // tiny-skia's edge antialiasing varies a little with the target size,
             // so allow small AA wobble; a missed region shows stale dim/clean
             // content or missing chrome, which is far larger.
-            let diffs: Vec<i16> =
-                buf.data().iter().zip(full.data()).map(|(a, b)| (*a as i16 - *b as i16).abs()).filter(|d| *d > 2).collect();
-            let max = diffs.iter().copied().max().unwrap_or(0);
+            let diffs: Vec<(usize, i16)> = buf
+                .data()
+                .iter()
+                .zip(full.data())
+                .map(|(a, b)| (*a as i16 - *b as i16).abs())
+                .enumerate()
+                .filter(|(_, d)| *d > 2)
+                .collect();
+            let max = diffs.iter().map(|d| d.1).max().unwrap_or(0);
+            // Where they are, for working out which layer's damage fell short.
+            let (xs, ys): (Vec<usize>, Vec<usize>) = diffs.iter().map(|(i, _)| (i / 4 % 640, i / 4 / 640)).unzip();
+            let span = |v: &[usize]| (v.iter().min().copied().unwrap_or(0), v.iter().max().copied().unwrap_or(0));
             assert!(
                 max <= 48 && diffs.len() < 400,
-                "step {n}: {} differing values, max {max}: damage tracking missed something",
-                diffs.len()
+                "step {n}: {} differing values, max {max}, in x {:?}, y {:?}: damage tracking missed something",
+                diffs.len(),
+                span(&xs),
+                span(&ys)
             );
         };
 

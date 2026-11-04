@@ -30,6 +30,7 @@ rectangle, numbered counters, an arrow, text and the toolbar](docs/screenshot.pn
 | Hyprland, river, Wayfire, COSMIC | ext-image-copy-capture / wlr-screencopy | layer-shell | same protocols as above; no headless CI run |
 | X11: Xfce, Cinnamon, MATE, LXQt, i3, Openbox, … | GetImage (RandR/Xinerama monitors) | override-redirect windows, MIT-SHM | Xvfb + headless Xorg under Openbox, 1 and 3 monitors |
 | macOS 12+ (preview: screenshots only) | Core Graphics | borderless windows | builds and unit tests; see [macOS](#macos-preview) |
+| Windows 10 and 11 (early: screenshots only) | GDI | topmost windows | builds, unit tests and a capture; see [Windows](#windows-early) |
 
 The capture backend is picked automatically (override with `-b ext|wlr|kwin|mutter|portal|x11`
 or `backend =` in the config). On X11 the clipboard supports INCR, so large
@@ -229,6 +230,23 @@ Builds of `main` come from the `macos` CI job (the `clipt-macos` artifact).
 ⌘ takes the place of Ctrl in the editor (⌘C copies, ⌘S saves, ⌘Z undoes).
 [docs/macos-plan.md](docs/macos-plan.md) has what's done, what's next, and
 a checklist for testers.
+
+### Windows (early)
+
+Screenshots work on Windows: `clipt` (the editor), `clipt full` and
+`clipt screen`, with copy and save as on Linux. There's no tray, hotkey or
+recording yet, and it hasn't been tried on a real PC. Builds of `main` come
+from the `windows` CI job (the `clipt-windows` artifact); run `clipt.exe`
+from a shortcut or a terminal:
+
+```
+clipt.exe                    # select, annotate, copy (Enter) or save (Ctrl+S)
+clipt.exe full -c            # the whole desktop to the clipboard
+```
+
+Screenshots go to Pictures\Screenshots and the config is
+`%APPDATA%\clipt\config.toml`. [docs/windows-plan.md](docs/windows-plan.md)
+has what's done and what's next.
 
 ### Shell completions
 
