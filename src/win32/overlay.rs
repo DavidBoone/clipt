@@ -281,7 +281,9 @@ impl Session {
                     crate::editor::ui::render(&self.editor, idx, &mut pm, (0, 0));
                 }
             } else {
-                paint_rects(&self.editor, idx, buf, w, &rects);
+                for &r in &rects {
+                    crate::editor::damage::repaint(&self.editor, idx, buf, w, h, r);
+                }
             }
             win.full = false;
             unsafe {
@@ -361,19 +363,6 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         self.hide();
-    }
-}
-
-/// Repaint the damaged rectangles of one screen's bitmap.
-fn paint_rects(ed: &Editor, idx: usize, buf: &mut [u8], w: u32, rs: &[IRect]) {
-    for r in rs {
-        let Some(mut tmp) = tiny_skia::Pixmap::new(r.w as u32, r.h as u32) else { continue };
-        crate::editor::ui::render(ed, idx, &mut tmp.as_mut(), (r.x, r.y));
-        let row = r.w as usize * 4;
-        for (y, src) in tmp.data().chunks_exact(row).enumerate() {
-            let off = ((r.y as usize + y) * w as usize + r.x as usize) * 4;
-            buf[off..off + row].copy_from_slice(src);
-        }
     }
 }
 
