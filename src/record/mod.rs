@@ -7,8 +7,9 @@
 //! are queued rather than dropped (a gap would be heard).
 //!
 //! One recording runs at a time, holding a lock on
-//! `$XDG_RUNTIME_DIR/clipt-record.pid`; `clipt record --stop` (and Ctrl-C,
-//! SIGTERM) end it cleanly, letting ffmpeg finish the file.
+//! `clipt-record.pid` in `$XDG_RUNTIME_DIR` (on macOS the user's temporary
+//! directory); `clipt record --stop` (and Ctrl-C, SIGTERM) end it cleanly,
+//! letting ffmpeg finish the file.
 //!
 //! See docs/recording-plan.md and docs/audio-plan.md.
 
@@ -147,8 +148,27 @@ fn apply(cmd: u8) {
 //   clipt-record.ctl  a FIFO the recorder reads one-byte commands from
 
 fn runtime_file(name: &str) -> PathBuf {
-    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    dir.join(name)
+    #[cfg(target_os = "macos")]
+    let dir = darwin_user_temp_dir();
+    #[cfg(not(target_os = "macos"))]
+    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    dir.unwrap_or_else(std::env::temp_dir).join(name)
+}
+
+/// The user's own temporary directory (`/var/folders/…/T/`), from the
+/// system rather than `$TMPDIR`, which sudo and some launchd contexts don't
+/// set: they'd fall back to the shared `/tmp`, and the tray and a terminal
+/// would look for the recording in different places.
+#[cfg(target_os = "macos")]
+fn darwin_user_temp_dir() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    let n = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr().cast(), buf.len()) };
+    // n counts the terminating NUL; 0 is failure, more than the buffer too long.
+    (n > 1 && n <= buf.len()).then(|| {
+        buf.truncate(n - 1);
+        PathBuf::from(std::ffi::OsString::from_vec(buf))
+    })
 }
 
 fn pidfile() -> PathBuf {
