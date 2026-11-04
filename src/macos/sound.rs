@@ -130,12 +130,12 @@ unsafe extern "C" {
 /// Host clock ticks as nanoseconds.
 fn host_ns(ticks: u64) -> u128 {
     static TIMEBASE: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
-    let &(numer, denom) = TIMEBASE.get_or_init(|| {
+    let &(num, den) = TIMEBASE.get_or_init(|| {
         let mut tb = [0u32; 2];
         unsafe { mach_timebase_info(&mut tb) };
         if tb[1] == 0 { (1, 1) } else { (tb[0], tb[1]) }
     });
-    ticks as u128 * numer as u128 / denom as u128
+    ticks as u128 * num as u128 / den as u128
 }
 
 /// The `Instant` of a moment `ns` nanoseconds into the host clock.
