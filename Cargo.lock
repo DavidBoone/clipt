@@ -159,6 +159,7 @@ dependencies = [
  "wayland-protocols-misc",
  "wayland-protocols-plasma",
  "wayland-protocols-wlr",
+ "windows-sys",
  "x11rb",
  "xkeysym",
  "zbus",

@@ -56,10 +56,18 @@ fn resolve() -> [Option<String>; 2] {
     ["/System/Library/Fonts/Supplemental/Arial.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf"].map(|p| Some(p.to_string()))
 }
 
+/// Regular and bold Segoe UI, Windows' own interface font, which every
+/// release since Vista has.
+#[cfg(windows)]
+fn resolve() -> [Option<String>; 2] {
+    let dir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
+    ["segoeui.ttf", "segoeuib.ttf"].map(|f| Some(format!(r"{dir}\Fonts\{f}")))
+}
+
 /// Regular and bold sans-serif paths. Asking fontconfig means spawning
 /// fc-match (~8 ms each), which dominates startup on compositors with fast
 /// capture, so the answer is cached until one of the files disappears.
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 fn resolve() -> [Option<String>; 2] {
     let cache = std::env::var_os("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
@@ -102,6 +110,7 @@ const FALLBACKS: &[&str] = &[
     "/usr/share/fonts/cantarell/Cantarell-VF.otf",
     "/Library/Fonts/Arial.ttf",
     "/System/Library/Fonts/Helvetica.ttc",
+    r"C:\Windows\Fonts\arial.ttf",
 ];
 
 /// Width of a single line in pixels.

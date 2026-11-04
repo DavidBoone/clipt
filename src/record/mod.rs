@@ -16,17 +16,17 @@ pub mod audio;
 mod camera;
 mod clarity;
 mod encode;
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 mod follow;
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 mod indicator;
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 mod linux;
 mod mkv;
 
 pub use encode::Balance;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 use crate::capture::Backend;
 use crate::capture::{LogicalRect, Output, VideoFrame};
 use crate::config::Config;
@@ -55,7 +55,7 @@ pub struct Options {
     pub output: Option<String>,
     pub fps: Option<u32>,
     pub cursor: bool,
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(wayland_x11)]
     pub backend: Option<Backend>,
     /// GIF or not, over `record_format`: from `--gif` or the overlay's
     /// toggle. A `.gif` output name also makes a GIF.
@@ -83,7 +83,7 @@ pub(crate) struct Capture {
 }
 
 /// Whether the recording is stopping, for capture code that polls.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(wayland_x11, allow(dead_code))]
 pub(crate) fn stopping() -> bool {
     STOP.load(Ordering::SeqCst)
 }
@@ -310,7 +310,7 @@ pub fn run(cfg: &Config, opts: Options) -> Result<()> {
     let codec = encode::choose(&cfg.record_codec)?;
 
     let interval = Duration::from_secs_f64(1.0 / fps as f64);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(wayland_x11)]
     let capture = linux::capture(&opts.target, opts.backend, opts.cursor, interval)?;
     #[cfg(target_os = "macos")]
     let capture = crate::macos::record::capture(&opts.target, opts.cursor, interval)?;
@@ -440,7 +440,7 @@ pub fn run(cfg: &Config, opts: Options) -> Result<()> {
             println!("{}", target.display());
             if cfg.notify {
                 let body = format!("{}  ·  {}", target.display(), stats);
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(wayland_x11)]
                 crate::notify::send("Recording saved", &body, None);
                 #[cfg(target_os = "macos")]
                 crate::macos::notify("Recording saved", &body);

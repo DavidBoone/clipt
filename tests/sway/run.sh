@@ -4,6 +4,9 @@
 #   single   one 1280x720 output, scale 1
 #   frac     one 1920x1080 output, scale 1.5
 #   dual     1280x720@1 + 1920x1080@2 side by side (mixed DPI)
+#   triple   1080p, 1440p at 1.25x lower down, and a rotated monitor below
+#   sound    one 1280x720 output, only the sound tests (split from single
+#            so the two halves run side by side in CI)
 set -u
 LAYOUT=${1:-single}
 mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
@@ -22,7 +25,7 @@ output * bg /tmp/bg.png stretch
 default_border none
 CONF
 case $LAYOUT in
-  single) echo 'output HEADLESS-1 mode 1280x720 scale 1 position 0 0' >> /tmp/sway.conf ;;
+  single|sound) echo 'output HEADLESS-1 mode 1280x720 scale 1 position 0 0' >> /tmp/sway.conf ;;
   frac)   echo 'output HEADLESS-1 mode 1920x1080 scale 1.5 position 0 0' >> /tmp/sway.conf ;;
   dual)   printf 'output HEADLESS-1 mode 1280x720 scale 1 position 0 0\noutput HEADLESS-2 mode 1920x1080 scale 2 position 1280 0\n' >> /tmp/sway.conf ;;
   # A typical messy office desk: 1080p, a 1440p panel at 1.25x sitting
@@ -39,6 +42,12 @@ sleep 1
 echo "== layout $LAYOUT"
 /clipt list | sed 's/^/  /'
 
+dur()   { ffprobe -v error -show_entries format=duration -of csv=p=0 "$1" 2>/dev/null; }
+vsize() { ffprobe -v error -select_streams v -show_entries stream=width,height -of csv=s=x:p=0 "$1" 2>/dev/null; }
+frame() { ffmpeg -v error -y -sseof "$2" -i "$1" -frames:v 1 "$3" 2>/dev/null; }   # $2: seconds from the end, e.g. -0.3
+even()  { awk "BEGIN{w=$1; h=$2; printf \"%dx%d\", w+w%2, h+h%2}"; }
+
+if [ "$LAYOUT" != sound ]; then
 echo "-- headless capture vs grim"
 for b in ext wlr; do
   /clipt full -b $b -o /tmp/full-$b.png 2>/tmp/err || { bad "full -b $b: $(cat /tmp/err)"; continue; }
@@ -60,10 +69,6 @@ d=$(magick compare -metric AE /tmp/g.png /tmp/grim-g.png null: 2>&1 | cut -d" " 
 check "geometry crop pixels match grim (AE=$d)" '[ "${d%.*}" -lt 100 ]'
 
 echo "-- recording"
-dur()   { ffprobe -v error -show_entries format=duration -of csv=p=0 "$1" 2>/dev/null; }
-vsize() { ffprobe -v error -select_streams v -show_entries stream=width,height -of csv=s=x:p=0 "$1" 2>/dev/null; }
-frame() { ffmpeg -v error -y -sseof "$2" -i "$1" -frames:v 1 "$3" 2>/dev/null; }   # $2: seconds from the end, e.g. -0.3
-even()  { awk "BEGIN{w=$1; h=$2; printf \"%dx%d\", w+w%2, h+h%2}"; }
 read NW NH < <(swaymsg -t get_outputs | jq -r '.[] | select(.name=="HEADLESS-1") | "\(.current_mode.width) \(.current_mode.height)"')
 grim -o HEADLESS-1 /tmp/rec-ref.png
 for b in ext wlr; do
@@ -149,6 +154,8 @@ pid=$(pgrep -f "^/clipt full -c" | head -1)
 echo hello | wl-copy; sleep 0.5
 check "daemon exits once something else is copied" '! pgrep -f "^/clipt full -c" >/dev/null'
 
+fi
+
 # Persistent virtual pointer + keyboard (headless Sway has no input devices).
 xkbcli compile-keymap --layout us > /tmp/keymap
 read LW LH < <(swaymsg -t get_outputs | jq -r '[.[].rect] | "\(map(.x+.width)|max) \(map(.y+.height)|max)"')
@@ -163,6 +170,7 @@ logical() { awk "BEGIN{printf \"%dx%d\", $1*$scale+0.5, $2*$scale+0.5}"; }
 gerr() { grep -v "notification failed" /tmp/gui.err | grep -v "^clipt: \(drew\|HDMI\|HEADLESS\|key\|pointer\|keyboard\|seat\)" | sed 's/^/  stderr: /'; }
 sleep 0.5
 
+if [ "$LAYOUT" != sound ]; then
 echo "-- interactive: drag + Enter copies"
 gui
 drag 100 100 400 300
@@ -343,8 +351,9 @@ if [ "$LAYOUT" = triple ]; then
   # the image must be the selection at one consistent scale
   check "spanning copy is 240x200 at 1x or 300x250 at 1.25x (got $(size /tmp/tx.png))" '[ "$(size /tmp/tx.png)" = 240x200 ] || [ "$(size /tmp/tx.png)" = 300x250 ]'
 fi
+fi
 # Sound: once per desktop, as it doesn't depend on the layout.
-if [ "$LAYOUT" = single ]; then
+if [ "$LAYOUT" = sound ]; then
   . /audio.sh
   audio_tests "100,50 301x200"
 

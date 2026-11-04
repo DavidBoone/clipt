@@ -161,7 +161,7 @@ fn ffmpeg() -> Command {
 
 #[cfg(target_os = "macos")]
 const INSTALL_FFMPEG: &str = "recording needs ffmpeg, which isn't installed (brew install ffmpeg)";
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 const INSTALL_FFMPEG: &str = "recording needs ffmpeg, which isn't installed (install the 'ffmpeg' package)";
 
 /// The first codec that encodes a test frame, or an error naming what's missing.

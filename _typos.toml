@@ -1,6 +1,6 @@
 [default]
-# "PNGs" gets split into "PN" + "Gs".
-extend-ignore-re = ["PNGs"]
+# "PNGs" gets split into "PN" + "Gs", and "PnP" (Plug and Play) into "Pn" + "P".
+extend-ignore-re = ["PNGs", "PnP"]
 
 [default.extend-words]
 clipt = "clipt"
@@ -8,3 +8,6 @@ clipt = "clipt"
 datas = "datas"
 # ffmpeg's audio pass-through filter.
 anull = "anull"
+# Win32's notification-icon constants (NIN_SELECT, NINF_KEY).
+NIN = "NIN"
+NINF = "NINF"

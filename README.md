@@ -9,8 +9,8 @@ the screen, drag a region, annotate it, copy or save. It also records the screen
 a region or a window to MP4 or GIF. One small Rust binary, no Qt/GTK,
 CPU-rendered with tiny-skia.
 
-![clipt's editor: a selection with its size label, a rectangle, an arrow,
-numbered counters, a highlighter, text and the toolbar](docs/screenshot.png)
+![clipt's editor over GNOME Settings: a selection with its size label, a
+rectangle, numbered counters, an arrow, text and the toolbar](docs/screenshot.png)
 
 ## Quick start
 
@@ -30,6 +30,7 @@ numbered counters, a highlighter, text and the toolbar](docs/screenshot.png)
 | Hyprland, river, Wayfire, COSMIC | ext-image-copy-capture / wlr-screencopy | layer-shell | same protocols as above; no headless CI run |
 | X11: Xfce, Cinnamon, MATE, LXQt, i3, Openbox, … | GetImage (RandR/Xinerama monitors) | override-redirect windows, MIT-SHM | Xvfb + headless Xorg under Openbox, 1 and 3 monitors |
 | macOS 12+ (preview; recording 12.3+, no sound yet) | Core Graphics; ScreenCaptureKit to record | borderless windows | builds and unit tests; see [macOS](#macos-preview) |
+| Windows 10 and 11 (early: screenshots only) | GDI | topmost windows | builds, unit tests and a capture; see [Windows](#windows-early) |
 
 The capture backend is picked automatically (override with `-b ext|wlr|kwin|mutter|portal|x11`
 or `backend =` in the config). On X11 the clipboard supports INCR, so large
@@ -113,16 +114,72 @@ around a recording, which GNOME otherwise has no way to show):
 clipt gnome-extension    # install and enable it; log out and back in once
 ```
 
-Editor: drag to select (click = the highlighted window or screen), drag handles to resize, drag
-inside to move. With **V**, click a shape to pick it: drag it or its
-handles, press a colour or change the width to restyle it, **Delete** to
-remove it; double-click text to edit it. Tools: **V** select, **R** rectangle, **E** ellipse, **A**
-arrow, **L** line, **P** pen, **M** highlighter, **T** text, **X** pixelate,
-**N** numbered counter. **1–8** colour (right-click a colour to change it),
-scroll or **[ ]** stroke width, Shift
-for squares and 45° lines. **Enter**/**Ctrl+C**/double-click copies, **Ctrl+S**
-saves, **Ctrl+Z**/**Ctrl+Shift+Z** undo/redo, **Esc** cancels, right-click
-backs out a step.
+Editor: drag to select (click = the highlighted window or screen), then
+annotate with the toolbar, and copy with **Enter** or save with **Ctrl+S**.
+Hover over a toolbar button for its key, or press **?** for the full list.
+On macOS, Cmd stands in for Ctrl and Option for Alt.
+
+<details>
+<summary>Every shortcut</summary>
+
+<!-- shortcuts: generated from src/editor/keys.rs -->
+| Key | |
+|---|---|
+| **Select** | |
+| <kbd>Drag</kbd> | Select an area |
+| <kbd>Click</kbd> | The highlighted window or screen |
+| <kbd>Tab</kbd> | Window or its whole screen |
+| <kbd>Ctrl+A</kbd> | The whole screen |
+| <kbd>Shift+drag</kbd> | A square |
+| <kbd>Arrows</kbd> | Move it a pixel |
+| <kbd>Alt+Arrows</kbd> | Move it 10 pixels |
+| <kbd>Shift+Arrows</kbd> | Resize it |
+| **Tools** | |
+| <kbd>V</kbd> | Select and move |
+| <kbd>R</kbd> | Rectangle |
+| <kbd>E</kbd> | Ellipse |
+| <kbd>A</kbd> | Arrow |
+| <kbd>L</kbd> | Line |
+| <kbd>P</kbd> | Pen |
+| <kbd>M</kbd> | Highlighter |
+| <kbd>T</kbd> | Text |
+| <kbd>X</kbd> | Pixelate |
+| <kbd>N</kbd> | Counter |
+| <kbd>Shift</kbd> | Square, circle or 45° line |
+| **Style** | |
+| <kbd>1–8</kbd> | Colour |
+| <kbd>Right-click</kbd> | On a colour: change it |
+| <kbd>[</kbd> | Thinner |
+| <kbd>]</kbd> | Thicker |
+| <kbd>Scroll</kbd> | Thinner or thicker |
+| **Edit** | |
+| <kbd>V, click</kbd> | Pick a shape to move or restyle |
+| <kbd>Delete</kbd> | Remove the picked shape |
+| <kbd>V, double-click</kbd> | Edit text |
+| <kbd>Shift+Enter</kbd> | New line in text |
+| <kbd>Ctrl+Z</kbd> | Undo |
+| <kbd>Ctrl+Shift+Z</kbd> | Redo |
+| <kbd>Right-click</kbd> | Back out a step |
+| **Finish** | |
+| <kbd>Enter</kbd> | Copy |
+| <kbd>Double-click</kbd> | Copy |
+| <kbd>Ctrl+C</kbd> | Copy |
+| <kbd>Ctrl+S</kbd> | Save |
+| <kbd>Ctrl+R</kbd> | Record a video instead |
+| <kbd>Esc</kbd> | Cancel |
+| <kbd>?</kbd> | Show or hide the shortcuts |
+| **Record** | |
+| <kbd>S</kbd> | Computer sound on or off |
+| <kbd>M</kbd> | Microphone on or off |
+| <kbd>G</kbd> | GIF or video |
+| <kbd>Enter</kbd> | Start recording |
+| <kbd>Right-click</kbd> | Select again |
+| <kbd>Ctrl+R</kbd> | A screenshot instead |
+| <kbd>Esc</kbd> | Cancel |
+| <kbd>?</kbd> | Show or hide the shortcuts |
+<!-- /shortcuts -->
+
+</details>
 
 To record a video instead, click **Video** at the bottom of the screen (or
 press **Ctrl+R**), select, toggle sound with **S** and the microphone with
@@ -230,6 +287,29 @@ Builds of `main` come from the `macos` CI job (the `clipt-macos` artifact).
 ⌘ takes the place of Ctrl in the editor (⌘C copies, ⌘S saves, ⌘Z undoes).
 [docs/macos-plan.md](docs/macos-plan.md) has what's done, what's next, and
 a checklist for testers.
+
+### Windows (early)
+
+Screenshots work on Windows: `clipt` (the editor), `clipt full` and
+`clipt screen`, with copy and save as on Linux, and `clipt tray` puts an
+icon in the notification area with **Print Screen** to capture a region.
+There's no recording yet, and it hasn't been tried on a real PC. Builds of
+`main` come from the `windows` CI job (the `clipt-windows` artifact):
+
+```
+clipt.exe                    # select, annotate, copy (Enter) or save (Ctrl+S)
+clipt.exe full -c            # the whole desktop to the clipboard
+clipt.exe tray               # the tray icon; its menu has Start with Windows
+```
+
+Windows 11 gives Print Screen to the Snipping Tool. To have it open clipt,
+turn off *Settings > Accessibility > Keyboard > Use the Print screen key to
+open screen capture*, or pick another key (`clipt config hotkey
+ctrl+shift+s`).
+
+Screenshots go to Pictures\Screenshots and the config is
+`%APPDATA%\clipt\config.toml`. [docs/windows-plan.md](docs/windows-plan.md)
+has what's done and what's next.
 
 ### Shell completions
 
