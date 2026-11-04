@@ -19,7 +19,9 @@ All notable changes are listed here. The format follows
   file. The macOS menu bar has the last three.
 - An early Windows build: screenshots with the same editor (select,
   annotate, copy, save), `clipt full` and `clipt screen`, on Windows 10 and
-  11. No tray, hotkey or recording yet.
+  11, and `clipt tray`: an icon in the notification area with the Linux
+  tray's screenshot actions, Print Screen to capture a region (`hotkey`),
+  notifications, and *Start with Windows*. No recording yet.
 
 ### Changed
 - The Copy button's tooltip shows Ctrl+C rather than Enter (both still copy).
