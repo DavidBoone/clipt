@@ -1104,7 +1104,11 @@ mod tests {
     fn codec_preferences() {
         assert_eq!(candidates("x264").unwrap(), vec![Codec::X264]);
         assert_eq!(candidates("nvenc").unwrap(), vec![Codec::Nvenc]);
-        assert!(candidates("auto").unwrap().ends_with(&[Codec::Nvenc, Codec::X264]));
+        if cfg!(target_os = "macos") {
+            assert_eq!(candidates("auto").unwrap(), vec![Codec::VideoToolbox, Codec::X264]);
+        } else {
+            assert!(candidates("auto").unwrap().ends_with(&[Codec::Nvenc, Codec::X264]));
+        }
         assert!(candidates("av1").is_err());
     }
 }
