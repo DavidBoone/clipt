@@ -182,12 +182,10 @@ pub(crate) fn capture(target: &Target, cursor: bool, interval: Duration) -> Resu
             let id: u32 = w.id.parse().with_context(|| format!("window id '{}'", w.id))?;
             let windows = unsafe { content.windows() };
             let win = windows.iter().find(|s| unsafe { s.windowID() } == id).context("that window has closed")?;
-            // Its size in pixels on the display it's on.
-            let (out, _) = crate::record::resolve_target(&outputs, target)?;
             let frame = unsafe { win.frame() };
-            let scale = scale(&out);
             crate::record::debug(&format!("recording window {id} ({} — {}) on its own", w.app, w.title));
             let filter = unsafe { SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &win) };
+            let scale = window_scale(&filter, &outputs, frame);
             // macOS 14+; before that the shadow comes along.
             if config.respondsToSelector(sel!(setIgnoreShadowsSingleWindow:)) {
                 unsafe { config.setIgnoreShadowsSingleWindow(true) };
@@ -230,6 +228,21 @@ pub(crate) fn capture(target: &Target, cursor: bool, interval: Duration) -> Resu
         run_stream(&filter, &config, sink)
     });
     Ok(Capture { zoom: false, start: Box::new(|| {}), stream })
+}
+
+/// Pixels per point for a window recorded on its own, wherever it is: the
+/// filter knows (macOS 14+); before that, the sharpest display the window
+/// is on, or of all displays when it's on none.
+fn window_scale(filter: &SCContentFilter, outputs: &[crate::capture::Output], f: CGRect) -> f64 {
+    if filter.respondsToSelector(sel!(pointPixelScale)) {
+        return unsafe { filter.pointPixelScale() } as f64;
+    }
+    let on = |o: &&crate::capture::Output| {
+        let (x, y, w, h) = (o.x as f64, o.y as f64, o.width as f64, o.height as f64);
+        x < f.origin.x + f.size.width && f.origin.x < x + w && y < f.origin.y + f.size.height && f.origin.y < y + h
+    };
+    let sharpest = |o: &mut dyn Iterator<Item = &crate::capture::Output>| o.map(scale).reduce(f64::max);
+    sharpest(&mut outputs.iter().filter(on)).or_else(|| sharpest(&mut outputs.iter())).unwrap_or(1.0)
 }
 
 /// Pixels per point on `out` (2 on Retina displays).
