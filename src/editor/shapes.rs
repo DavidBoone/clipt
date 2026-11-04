@@ -38,6 +38,21 @@ impl Tool {
             Tool::Counter => 'n',
         }
     }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Tool::Select => "Select and move",
+            Tool::Rect => "Rectangle",
+            Tool::Ellipse => "Ellipse",
+            Tool::Arrow => "Arrow",
+            Tool::Line => "Line",
+            Tool::Pen => "Pen",
+            Tool::Marker => "Highlighter",
+            Tool::Text => "Text",
+            Tool::Pixelate => "Pixelate",
+            Tool::Counter => "Counter",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

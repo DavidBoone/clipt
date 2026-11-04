@@ -22,6 +22,12 @@ All notable changes are listed here. The format follows
   11, and `clipt tray`: an icon in the notification area with the Linux
   tray's screenshot actions, Print Screen to capture a region (`hotkey`),
   notifications, and *Start with Windows*. No recording yet.
+- **?** in the editor shows every shortcut, including ones that were only in
+  the code (arrows nudge the selection, Alt+arrows by 10 pixels, Ctrl+A
+  takes the whole screen). The README has the same list.
+- After selecting, the hint bar at the top says how to copy, save and
+  start again, until you draw something; it moves to the bottom when it
+  would cover the selection.
 
 ### Changed
 - The Copy button's tooltip shows Ctrl+C rather than Enter (both still copy).
@@ -33,6 +39,8 @@ All notable changes are listed here. The format follows
   toolbar buttons until something else changed.
 - Right-clicking in Video mode didn't clear the selection if anything had
   been drawn in Screenshot mode, though the drawing isn't shown there.
+- macOS: the editor's tooltips said Ctrl+Z, Ctrl+S and so on, where the keys
+  are Cmd+Z and Cmd+S.
 
 ## [0.6.1] - 2026-11-03
 
