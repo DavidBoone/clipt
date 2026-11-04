@@ -230,6 +230,10 @@ pub struct Editor {
     pub text: Option<TextEdit>,
     /// Visible windows, topmost first (see `crate::windows`).
     pub windows: Vec<crate::windows::Window>,
+    /// The window a click selected (its id) and the selection that made,
+    /// for `selected_window`: a window filling its screen has the same rect
+    /// as the screen, which Tab, Ctrl+A or drawing can select too.
+    clicked_window: Option<(String, Rect)>,
     /// Tab flips hover from the window under the pointer to its monitor.
     pub hover_screen: bool,
     /// The highlight eases between targets: where it started, where it's
@@ -282,6 +286,7 @@ impl Editor {
             swap_rb,
             fonts,
             sel: None,
+            clicked_window: None,
             shapes: Vec::new(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -395,16 +400,21 @@ impl Editor {
     /// switched to whole screens), or else its screen.
     fn target_at(&self, p: Pt) -> Option<Hover> {
         let scr = self.screens.iter().find(|s| s.bounds().contains(p.0, p.1))?;
-        if !self.hover_screen {
-            let desk = self.desktop();
-            let hit = self.windows.iter().find(|w| Rect::from_xywh(w.x, w.y, w.width, w.height).is_some_and(|r| r.contains(p.0, p.1)));
-            if let Some(w) = hit
-                && let Some(r) = Rect::from_xywh(w.x, w.y, w.width, w.height).and_then(|r| r.intersect(&desk))
-            {
-                return Some(Hover { rect: r, name: w.name().to_string(), is_window: true });
-            }
+        if let Some((w, r)) = self.window_at(p) {
+            return Some(Hover { rect: r, name: w.name().to_string(), is_window: true });
         }
         Some(Hover { rect: scr.bounds(), name: scr.output.name.clone(), is_window: false })
+    }
+
+    /// The topmost window at `p` and its rect on the desktop, unless Tab
+    /// switched to whole screens.
+    fn window_at(&self, p: Pt) -> Option<(&crate::windows::Window, Rect)> {
+        if self.hover_screen {
+            return None;
+        }
+        let w = self.windows.iter().find(|w| Rect::from_xywh(w.x, w.y, w.width, w.height).is_some_and(|r| r.contains(p.0, p.1)))?;
+        let r = Rect::from_xywh(w.x, w.y, w.width, w.height)?.intersect(&self.desktop())?;
+        Some((w, r))
     }
 
     /// The area drawn undimmed: the selection, or else the hover highlight.
@@ -599,6 +609,7 @@ impl Editor {
                 if (p.0 - s.0).abs() > CLICK_SLOP || (p.1 - s.1).abs() > CLICK_SLOP {
                     self.drag = Drag::Creating { start: s };
                     self.sel = norm_rect(s, p);
+                    self.clicked_window = None;
                 }
             }
             Drag::Creating { start } => {
@@ -718,6 +729,7 @@ impl Editor {
                 self.revision += 1;
             } else if self.shapes.is_empty() || self.record {
                 self.sel = None;
+                self.clicked_window = None;
                 self.tool = Tool::Select;
             }
             return true;
@@ -793,6 +805,7 @@ impl Editor {
                     // Drawing before selecting implies "this whole screen".
                     if let Some(i) = self.screen_at(p) {
                         self.sel = Some(self.screens[i].bounds());
+                        self.clicked_window = None;
                     }
                 }
                 let color = self.current_color();
@@ -834,10 +847,12 @@ impl Editor {
                 // under the pointer, or its whole screen. Also with something
                 // already selected, when nothing is highlighted.
                 self.pointer = p;
-                if let Some(h) = self.target_at(p) {
-                    self.sel = Some(h.rect);
+                if let Some((w, r)) = self.window_at(p) {
+                    self.clicked_window = Some((w.id.clone(), r));
+                    self.sel = Some(r);
                 } else if let Some(i) = self.screen_at(p) {
                     self.sel = Some(self.screens[i].bounds());
+                    self.clicked_window = None;
                 }
             }
             Drag::Creating { .. } => {
@@ -931,6 +946,7 @@ impl Editor {
                 Key::Char('a') | Key::Char('A') => {
                     let i = self.screen_at(self.pointer).unwrap_or(0);
                     self.sel = self.screens.get(i).map(|s| s.bounds());
+                    self.clicked_window = None;
                 }
                 _ => return false,
             }
@@ -1227,11 +1243,13 @@ impl Editor {
     }
 
     /// The window the selection is, if it was picked by clicking a window
-    /// (exactly its highlight) rather than dragged or adjusted.
+    /// and not dragged, adjusted or selected again since.
     pub fn selected_window(&self) -> Option<&crate::windows::Window> {
-        let sel = self.sel?;
-        let desk = self.desktop();
-        self.windows.iter().find(|w| Rect::from_xywh(w.x, w.y, w.width, w.height).and_then(|r| r.intersect(&desk)) == Some(sel))
+        let (id, r) = self.clicked_window.as_ref()?;
+        if self.sel != Some(*r) {
+            return None;
+        }
+        self.windows.iter().find(|w| w.id == *id)
     }
 
     /// Selection to export; falls back to the screen under the pointer.
@@ -1451,6 +1469,44 @@ mod tests {
         ed.key(Key::Tab, Mods::default());
         click(&mut ed, (10.0, 290.0));
         assert_eq!(ed.sel.unwrap().width(), 400.0, "bare desktop selects the screen");
+    }
+
+    /// Only a window clicked counts as selected: one filling its screen has
+    /// the screen's rect, which Tab or drawing can select too.
+    #[test]
+    fn selected_window_is_only_the_one_clicked() {
+        let mut ed = editor(vec![shot("A", 0, 400, 300, 1, [0, 0, 0])], false);
+        let full =
+            crate::windows::Window { x: 0.0, y: 0.0, width: 400.0, height: 300.0, app: "a".into(), title: String::new(), id: "7".into() };
+        ed.windows = vec![full];
+        let click = |ed: &mut Editor, p: Pt| {
+            ed.pointer_motion(p, Mods::default());
+            ed.button_press(p, true, Mods::default());
+            ed.button_release(p, true);
+        };
+        let deselect = |ed: &mut Editor| {
+            ed.button_press((5.0, 5.0), false, Mods::default());
+            assert!(ed.sel.is_none());
+        };
+        click(&mut ed, (100.0, 100.0));
+        assert_eq!(ed.selected_window().map(|w| w.id.as_str()), Some("7"));
+
+        deselect(&mut ed);
+        ed.key(Key::Tab, Mods::default());
+        click(&mut ed, (100.0, 100.0));
+        assert_eq!(ed.sel.unwrap().width(), 400.0);
+        assert!(ed.selected_window().is_none(), "Tab picked the screen");
+
+        ed.key(Key::Tab, Mods::default());
+        deselect(&mut ed);
+        ed.key(Key::Tab, Mods::default());
+        click(&mut ed, (100.0, 100.0));
+        assert!(ed.selected_window().is_some());
+        deselect(&mut ed);
+        ed.tool = Tool::Rect;
+        drag(&mut ed, (10.0, 10.0), (50.0, 50.0));
+        assert_eq!(ed.sel.unwrap().width(), 400.0);
+        assert!(ed.selected_window().is_none(), "drawing selected the screen");
     }
 
     /// The screenshot overlay switches to record mode and back with Ctrl+R
