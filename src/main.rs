@@ -1,7 +1,7 @@
-//! clipt — a lightweight screenshot tool for Wayland, X11 and macOS.
+//! clipt — a lightweight screenshot tool for Wayland, X11, macOS and Windows.
 
 // Some shared code (image rotation, video paths) only serves what macOS
-// can't do yet, recording among it.
+// and Windows can't do yet, recording among it.
 #![cfg_attr(not(wayland_x11), allow(dead_code))]
 
 mod capture;
@@ -28,6 +28,8 @@ mod text;
 mod tray;
 #[cfg(wayland_x11)]
 mod update;
+#[cfg(windows)]
+mod win32;
 mod windows;
 #[cfg(wayland_x11)]
 mod x11;
@@ -46,6 +48,8 @@ use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
 use macos::HELP;
+#[cfg(windows)]
+use win32::HELP;
 
 #[cfg(wayland_x11)]
 const HELP: &str = "\
@@ -253,6 +257,19 @@ fn run() -> Result<()> {
         return config_cmd(&args);
     }
     macos::run(args, Config::load()?)
+}
+
+#[cfg(windows)]
+fn run() -> Result<()> {
+    START.get_or_init(std::time::Instant::now);
+    let args = parse_args()?;
+    if args.cmd == "debug-icon" {
+        return debug_icon(&args);
+    }
+    if args.cmd == "config" {
+        return config_cmd(&args);
+    }
+    win32::run(args, Config::load()?)
 }
 
 /// `clipt debug-icon [-o PATH]`: a contact sheet of the icon's sizes, or,

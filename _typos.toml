@@ -1,6 +1,6 @@
 [default]
-# "PNGs" gets split into "PN" + "Gs".
-extend-ignore-re = ["PNGs"]
+# "PNGs" gets split into "PN" + "Gs", and "PnP" (Plug and Play) into "Pn" + "P".
+extend-ignore-re = ["PNGs", "PnP"]
 
 [default.extend-words]
 clipt = "clipt"

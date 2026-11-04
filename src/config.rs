@@ -85,6 +85,13 @@ impl Default for Config {
 }
 
 impl Config {
+    #[cfg(windows)]
+    pub fn path() -> PathBuf {
+        let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| home().join("AppData/Roaming"));
+        base.join("clipt").join("config.toml")
+    }
+
+    #[cfg(not(windows))]
     pub fn path() -> PathBuf {
         let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".config"));
         base.join("clipt/config.toml")
@@ -237,7 +244,11 @@ fn fresh_path(dir: &std::path::Path, pattern: &str, ext: &str) -> PathBuf {
 }
 
 pub fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE");
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME");
+    home.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
 }
 
 pub fn expand(p: &str) -> PathBuf {
@@ -248,6 +259,7 @@ pub fn expand(p: &str) -> PathBuf {
     }
 }
 
+#[cfg(not(windows))]
 fn strftime(fmt: &str) -> String {
     let Ok(cfmt) = std::ffi::CString::new(fmt) else { return fmt.to_string() };
     unsafe {
@@ -258,6 +270,60 @@ fn strftime(fmt: &str) -> String {
         let n = libc::strftime(buf.as_mut_ptr().cast(), buf.len(), cfmt.as_ptr(), &tm);
         String::from_utf8_lossy(&buf[..n]).into_owned()
     }
+}
+
+/// The C runtime's strftime aborts the process on a conversion it doesn't
+/// know (its invalid-parameter handler), so Windows gets the common ones
+/// here and leaves any other `%x` as it is.
+#[cfg(windows)]
+fn strftime(fmt: &str) -> String {
+    let mut t = unsafe { std::mem::zeroed() };
+    unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut t) };
+    format_time(fmt, &t)
+}
+
+#[cfg(windows)]
+fn format_time(fmt: &str, t: &windows_sys::Win32::Foundation::SYSTEMTIME) -> String {
+    const DAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const MONTHS: [&str; 12] =
+        ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    let day = DAYS[t.wDayOfWeek as usize % 7];
+    let month = MONTHS[(t.wMonth as usize).clamp(1, 12) - 1];
+    let h12 = match t.wHour % 12 {
+        0 => 12,
+        h => h,
+    };
+    let mut out = String::new();
+    let mut chars = fmt.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        let s = match chars.next() {
+            Some('Y') => t.wYear.to_string(),
+            Some('y') => format!("{:02}", t.wYear % 100),
+            Some('m') => format!("{:02}", t.wMonth),
+            Some('d') => format!("{:02}", t.wDay),
+            Some('e') => format!("{:2}", t.wDay),
+            Some('H') => format!("{:02}", t.wHour),
+            Some('I') => format!("{h12:02}"),
+            Some('M') => format!("{:02}", t.wMinute),
+            Some('S') => format!("{:02}", t.wSecond),
+            Some('p') => (if t.wHour < 12 { "AM" } else { "PM" }).into(),
+            Some('a') => day[..3].into(),
+            Some('A') => day.into(),
+            Some('b') => month[..3].into(),
+            Some('B') => month.into(),
+            Some('F') => format!("{}-{:02}-{:02}", t.wYear, t.wMonth, t.wDay),
+            Some('T') => format!("{:02}:{:02}:{:02}", t.wHour, t.wMinute, t.wSecond),
+            Some('%') => "%".into(),
+            Some(o) => format!("%{o}"),
+            None => "%".into(),
+        };
+        out.push_str(&s);
+    }
+    out
 }
 
 #[cfg(test)]
