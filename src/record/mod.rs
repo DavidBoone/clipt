@@ -195,8 +195,15 @@ impl Lock {
             .truncate(false)
             .open(&p)
             .with_context(|| format!("opening {}", p.display()))?;
-        if flock(&file, FlockOperation::NonBlockingLockExclusive).is_err() {
-            bail!("already recording; stop it with 'clipt record --stop'");
+        // `status()`, which a tray polls, holds a shared lock for a moment:
+        // a recording starting just then mustn't be told one is running.
+        let mut tries = 0;
+        while flock(&file, FlockOperation::NonBlockingLockExclusive).is_err() {
+            tries += 1;
+            if tries == 10 {
+                bail!("already recording; stop it with 'clipt record --stop'");
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
         let lock = Self { file };
         lock.set(false)?;
