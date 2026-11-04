@@ -689,14 +689,15 @@ impl Editor {
                 return true;
             }
             // Right click backs out: in-progress drag, then text, then the
-            // picked shape, then the selection.
+            // picked shape, then the selection (in record mode, whose
+            // shapes aren't shown, even when there are some).
             if !matches!(self.drag, Drag::None) {
                 self.cancel_drag();
             } else if self.text.is_some() {
                 self.cancel_text();
             } else if self.selected.take().is_some() {
                 self.revision += 1;
-            } else if self.shapes.is_empty() {
+            } else if self.shapes.is_empty() || self.record {
                 self.sel = None;
                 self.tool = Tool::Select;
             }
@@ -2066,5 +2067,20 @@ mod tests {
         run("hover toolbar area", &mut ed, &|e, i| {
             e.pointer_motion((1100.0 + i as f32 * 4.0, 1340.0), m);
         });
+    }
+
+    /// Shapes drawn before switching to record mode aren't shown there, so
+    /// they don't stop a right-click from selecting again.
+    #[test]
+    fn right_click_selects_again_in_record_mode() {
+        let mut ed = editor(vec![shot("A", 0, 400, 300, 1, [0, 0, 0])], false);
+        let m = Mods::default();
+        drag(&mut ed, (100.0, 100.0), (300.0, 250.0));
+        ed.shapes.push(Shape::Counter { pos: (150.0, 150.0), n: 1, color: Color::BLACK, radius: 20.0 });
+        ed.button_press((150.0, 150.0), false, m);
+        assert!(ed.sel.is_some(), "screenshot mode keeps the selection under the shapes");
+        ed.record = true;
+        ed.button_press((150.0, 150.0), false, m);
+        assert!(ed.sel.is_none());
     }
 }

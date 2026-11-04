@@ -31,6 +31,8 @@ All notable changes are listed here. The format follows
   Video mode.
 - Turning the sound or microphone on or off with S or M didn't redraw their
   toolbar buttons until something else changed.
+- Right-clicking in Video mode didn't clear the selection if anything had
+  been drawn in Screenshot mode, though the drawing isn't shown there.
 
 ## [0.6.1] - 2026-11-03
 
