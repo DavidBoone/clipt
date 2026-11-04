@@ -29,6 +29,10 @@ Rendering changes are guarded by `partial_repaints_match_full_render`, which
 replays a session through the damage-tracked redraw path and compares every
 frame with a full redraw.
 
+`tests/screenshot/make.sh` regenerates the README's picture, `docs/screenshot.png`:
+clipt's editor over real GNOME Settings in the GNOME test container, annotated
+by the same scripted input (needs Docker).
+
 ## Benchmarks
 
 ```
