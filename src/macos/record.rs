@@ -14,7 +14,7 @@ use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, ProtocolObject};
-use objc2::{AllocAnyThread, DefinedClass, MainThreadMarker, define_class, msg_send};
+use objc2::{AllocAnyThread, DefinedClass, MainThreadMarker, define_class, msg_send, sel};
 use objc2_app_kit::NSApplication;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGDisplayBounds;
@@ -170,7 +170,10 @@ pub(crate) fn capture(target: &Target, cursor: bool, interval: Duration) -> Resu
             let scale = scale(&out);
             crate::record::debug(&format!("recording window {id} ({} — {}) on its own", w.app, w.title));
             let filter = unsafe { SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &win) };
-            unsafe { config.setIgnoreShadowsSingleWindow(true) };
+            // macOS 14+; before that the shadow comes along.
+            if config.respondsToSelector(sel!(setIgnoreShadowsSingleWindow:)) {
+                unsafe { config.setIgnoreShadowsSingleWindow(true) };
+            }
             (filter, (frame.size.width * scale, frame.size.height * scale))
         }
         t => {
