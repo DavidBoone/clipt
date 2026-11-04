@@ -13,7 +13,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{AnyClass, ProtocolObject};
 use objc2::{AllocAnyThread, DefinedClass, MainThreadMarker, define_class, msg_send};
 use objc2_app_kit::NSApplication;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -149,6 +149,8 @@ fn shareable_content() -> Result<Retained<SCShareableContent>> {
 /// on the capture thread.
 pub(crate) fn capture(target: &Target, cursor: bool, interval: Duration) -> Result<Capture> {
     let mtm = MainThreadMarker::new().context("not on the main thread")?;
+    // Weakly linked (build.rs): before 12.3 its classes don't exist.
+    anyhow::ensure!(AnyClass::get(c"SCStream").is_some(), "recording needs macOS 12.3 or later");
     // ScreenCaptureKit needs the window server connection AppKit makes.
     let _ = NSApplication::sharedApplication(mtm);
     super::capture::ensure_permission()?;
