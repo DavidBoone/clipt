@@ -1,10 +1,11 @@
 //! clipt on Windows: screenshots, with the same editor as on Linux and
-//! macOS. The tray, recording and `clipt update` aren't there yet; see
-//! docs/windows-plan.md.
+//! macOS, and the tray with a hotkey. Recording and `clipt update` aren't
+//! there yet; see docs/windows-plan.md.
 
 mod capture;
 mod clipboard;
 mod overlay;
+mod tray;
 mod windows;
 
 use crate::config::Config;
@@ -20,6 +21,7 @@ USAGE:
     clipt full            Capture the whole desktop
     clipt screen [NAME]   Capture one monitor (default: the main one)
     clipt list            Show the monitors
+    clipt tray            Notification-area icon, with the hotkey (Print Screen)
     clipt config [KEY [VALUE]]  Show the settings, one setting, or set it
 
 OPTIONS:
@@ -41,22 +43,30 @@ EDITOR KEYS:
     Ctrl+Z / Ctrl+Shift+Z undo / redo     Esc / right-click  cancel / back
 
 Config: %APPDATA%\\clipt\\config.toml (save_dir, filename, color, palette,
-width, copy_on_save, cursor, font). Screenshots go to
-Pictures\\Screenshots, where Windows keeps its own.
+width, copy_on_save, notify, cursor, font, hotkey, hotkey_full). hotkey is
+the tray's shortcut for a region, default \"print\" (Print Screen), or
+e.g. \"ctrl+shift+s\"; \"\" turns it off. Notifications need the tray.
+Screenshots go to Pictures\\Screenshots, where Windows keeps its own.
 ";
 
 pub fn run(args: Args, cfg: Config) -> Result<()> {
     match args.cmd.as_str() {
-        "gui" | "full" | "screen" | "list" => {}
-        "record" | "tray" | "update" | "gnome-extension" => bail!("`clipt {}` isn't available on Windows yet", args.cmd),
+        "gui" | "full" | "screen" | "list" | "tray" => {}
+        "record" | "update" | "gnome-extension" => bail!("`clipt {}` isn't available on Windows yet", args.cmd),
         other => bail!("unknown command '{other}' (try --help)"),
     }
     if args.backend.is_some() {
         bail!("--backend: Windows has only the one");
     }
+    if matches!(args.cmd.as_str(), "gui" | "tray") && detach()? {
+        return Ok(());
+    }
     // Physical pixels everywhere, so every monitor is captured and covered
     // at its own resolution, whatever its scale.
     capture::dpi_aware();
+    if args.cmd == "tray" {
+        return tray::run(&cfg);
+    }
     let cursor = args.cursor || cfg.cursor;
     if args.delay > 0.0 {
         std::thread::sleep(std::time::Duration::from_secs_f64(args.delay));
@@ -104,6 +114,11 @@ pub fn run(args: Args, cfg: Config) -> Result<()> {
         }
         if args.clipboard {
             clipboard::copy(&img, &png)?;
+            if cfg.notify {
+                tray::notify("Screenshot copied", &format!("{} × {}", img.width, img.height), None);
+            }
+        } else if let (true, Some(p)) = (cfg.notify && args.output.is_none(), &path) {
+            tray::notify("Screenshot saved", &p.display().to_string(), Some(p));
         }
         return Ok(());
     }
@@ -133,13 +148,47 @@ pub fn run(args: Args, cfg: Config) -> Result<()> {
     session.hide();
     drop(session);
     let png = img.encode_png()?;
-    if outcome == Outcome::Copy || cfg.copy_on_save {
+    let want_copy = outcome == Outcome::Copy || cfg.copy_on_save;
+    if want_copy {
         clipboard::copy(&img, &png)?;
     }
-    if outcome == Outcome::Save || args.output.is_some() {
-        write_png(&cfg, args.output.as_deref(), &png)?;
+    let saved = if outcome == Outcome::Save || args.output.is_some() { write_png(&cfg, args.output.as_deref(), &png)? } else { None };
+    if cfg.notify {
+        match (&saved, want_copy) {
+            (Some(p), true) => tray::notify("Screenshot saved and copied", &p.display().to_string(), Some(p)),
+            (Some(p), false) => tray::notify("Screenshot saved", &p.display().to_string(), Some(p)),
+            (None, true) => tray::notify("Screenshot copied", &format!("{} × {}", img.width, img.height), None),
+            _ => {}
+        }
     }
     Ok(())
+}
+
+/// Started with a console of its own (double-clicked, or from a shortcut),
+/// `gui` and `tray` start again without one and return true, so that the
+/// console window goes away at once instead of sitting behind the overlay,
+/// or beside the tray for as long as it runs. From a terminal, which
+/// shares its console, they run as they are.
+fn detach() -> Result<bool> {
+    let mut pids = [0u32; 2];
+    let n = unsafe { windows_sys::Win32::System::Console::GetConsoleProcessList(pids.as_mut_ptr(), 2) };
+    if n != 1 || std::env::var_os("CLIPT_DETACHED").is_some() {
+        return Ok(false);
+    }
+    use std::os::windows::process::CommandExt;
+    // Started by Explorer, this process may take the foreground; the new
+    // one is allowed to as well.
+    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(u32::MAX) };
+    std::process::Command::new(std::env::current_exe()?)
+        .args(std::env::args_os().skip(1))
+        .env("CLIPT_DETACHED", "1")
+        .creation_flags(tray::DETACHED_PROCESS)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("starting clipt without a console")?;
+    Ok(true)
 }
 
 /// A null-terminated UTF-16 copy of `s`, for the W functions.

@@ -1,8 +1,8 @@
 # Windows: implementation plan
 
-Status, 2026-11-03: phases 0 and 1 are built (screenshots), checked under
-Wine and in CI, and not yet tried on a real PC. A tester at work can try
-each phase's build; see *Testing* below.
+Status, 2026-11-04: phases 0, 1 and 2 are built (screenshots, the tray and
+its hotkey), checked under Wine and in CI, and not yet tried on a real PC.
+A tester at work can try each phase's build; see *Testing* below.
 
 ## Done
 
@@ -17,7 +17,17 @@ each phase's build; see *Testing* below.
   through a DIB section, the window picker from `EnumWindows` and DWM's
   frame bounds, and the clipboard as `CF_DIB` plus `PNG`. Config in
   `%APPDATA%\clipt`, Segoe UI for text, screenshots to
-  `Pictures\Screenshots`. No notifications yet: they need the tray (phase 2).
+  `Pictures\Screenshots`.
+- **Phase 2.** `src/win32/tray.rs`: `Shell_NotifyIcon` with the Linux
+  tray's screenshot actions (left click captures a region), the ticks for
+  *Copy when saving*, *Notifications* and *Start with Windows* (HKCU's Run
+  key), and `RegisterHotKey` for `hotkey` (default `print`) and
+  `hotkey_full`. If Print Screen is taken, a notification says where to
+  free it. Screenshot processes hand their notification to the tray over
+  `WM_COPYDATA` (Windows shows them only for a notification-area icon), and
+  clicking one opens the file. Actions start `clipt` with no console, and a
+  `clipt` double-clicked or started from a shortcut starts again without
+  its console window. One tray per session (a named mutex).
 
 Choices made on the way, where they differ from the plan below:
 

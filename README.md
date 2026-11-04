@@ -234,15 +234,21 @@ a checklist for testers.
 ### Windows (early)
 
 Screenshots work on Windows: `clipt` (the editor), `clipt full` and
-`clipt screen`, with copy and save as on Linux. There's no tray, hotkey or
-recording yet, and it hasn't been tried on a real PC. Builds of `main` come
-from the `windows` CI job (the `clipt-windows` artifact); run `clipt.exe`
-from a shortcut or a terminal:
+`clipt screen`, with copy and save as on Linux, and `clipt tray` puts an
+icon in the notification area with **Print Screen** to capture a region.
+There's no recording yet, and it hasn't been tried on a real PC. Builds of
+`main` come from the `windows` CI job (the `clipt-windows` artifact):
 
 ```
 clipt.exe                    # select, annotate, copy (Enter) or save (Ctrl+S)
 clipt.exe full -c            # the whole desktop to the clipboard
+clipt.exe tray               # the tray icon; its menu has Start with Windows
 ```
+
+Windows 11 gives Print Screen to the Snipping Tool. To have it open clipt,
+turn off *Settings > Accessibility > Keyboard > Use the Print screen key to
+open screen capture*, or pick another key (`clipt config hotkey
+ctrl+shift+s`).
 
 Screenshots go to Pictures\Screenshots and the config is
 `%APPDATA%\clipt\config.toml`. [docs/windows-plan.md](docs/windows-plan.md)

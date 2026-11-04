@@ -128,6 +128,10 @@ impl Dib {
         }
     }
 
+    pub fn bitmap(&self) -> windows_sys::Win32::Graphics::Gdi::HBITMAP {
+        self.bitmap
+    }
+
     pub fn bytes(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.bits, (self.w * self.h * 4) as usize) }
     }

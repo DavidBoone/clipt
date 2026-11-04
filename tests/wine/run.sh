@@ -54,5 +54,20 @@ check "Esc cancels (rc=$rc)" '[ $rc = 0 ]'
 $C gui & p=$!; sleep 4; xdotool mousemove 500 400 sleep 0.5 click 1; sleep 0.5; xdotool key ctrl+c; wait $p; sleep 1
 check "a click picks the window under it ($(pastesize))" '[ "$(pastesize)" = 950x712 ]'
 
+echo "-- the tray"
+CLIPT_DEBUG=1 $C tray 2>/tmp/tray.err & tp=$!; sleep 3
+check "clipt tray stays running" 'kill -0 $tp 2>/dev/null'
+out=$($C tray 2>&1); rc=$?
+check "a second tray says one is running (rc=$rc: ${out##*: })" '[ $rc != 0 ] && echo "$out" | grep -q "already running"'
+# Print Screen, the default hotkey, starts the overlay.
+xdotool key Print; sleep 4
+check "Print Screen opens the overlay" 'pgrep -f "clipt.exe gui" >/dev/null'
+xdotool key Escape; sleep 1
+check "and Esc closes it" '! pgrep -f "clipt.exe gui" >/dev/null'
+$C full -c; sleep 1
+check "a screenshot tells the tray, which shows a notification" 'grep -q "notification: Screenshot copied" /tmp/tray.err'
+# Quit, from the menu: the window's close does the same.
+kill $tp; wait $tp 2>/dev/null
+
 echo "== $pass passed, $fail failed"
 [ $fail = 0 ]
