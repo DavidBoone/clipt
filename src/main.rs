@@ -628,8 +628,8 @@ fn remember_gif(cfg: &Config, args: &Args, ed: &editor::Editor) {
 }
 
 /// What a record-mode overlay picked: the window clicked, or the area.
-#[cfg(wayland_x11)]
-fn recording_target(ed: &Editor) -> Result<record::Target> {
+#[cfg(unix)]
+fn recording_target(ed: &editor::Editor) -> Result<record::Target> {
     let r = ed.final_rect().context("nothing selected")?;
     Ok(match ed.selected_window() {
         Some(w) => record::Target::Window(w.clone()),

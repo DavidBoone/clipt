@@ -237,7 +237,6 @@ fn record_cmd(mut args: Args, cfg: &Config) -> Result<()> {
 /// The overlay in record mode: the area dragged or the window clicked, and
 /// whether to save a GIF; `None` if cancelled.
 fn pick_recording_area(cfg: &Config, args: &Args, cursor: bool, mtm: MainThreadMarker) -> Result<Option<(crate::record::Target, bool)>> {
-    use crate::record::Target;
     capture::ensure_permission()?;
     let font_path = cfg.font.clone();
     let fonts = std::thread::spawn(move || crate::text::Fonts::load(font_path.as_deref()));
@@ -258,11 +257,7 @@ fn pick_recording_area(cfg: &Config, args: &Args, cursor: bool, mtm: MainThreadM
     }
     let ed = session.editor();
     let gif = ed.gif;
-    let r = ed.final_rect().context("nothing selected")?;
-    let target = match ed.selected_window() {
-        Some(w) => Target::Window(w.clone()),
-        None => Target::Rect((r.left() as f64, r.top() as f64, r.width() as f64, r.height() as f64)),
-    };
+    let target = crate::recording_target(ed)?;
     // Before the first frame, and before the recording keeps this thread.
     session.dismiss();
     Ok(Some((target, gif)))
