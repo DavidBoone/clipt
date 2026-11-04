@@ -284,7 +284,10 @@ pub(crate) fn notify(summary: &str, body: &str) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
-    if let Err(e) = r {
-        eprintln!("clipt: notification failed: {e}");
+    match r {
+        // Reaped in the background: in the long-running tray it would
+        // otherwise linger as a zombie.
+        Ok(mut child) => drop(std::thread::spawn(move || child.wait())),
+        Err(e) => eprintln!("clipt: notification failed: {e}"),
     }
 }
