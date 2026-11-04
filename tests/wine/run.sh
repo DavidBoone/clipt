@@ -1,0 +1,58 @@
+#!/bin/bash
+# clipt.exe under Wine on Xvfb + Openbox, the editor driven by xdotool.
+set -u
+export HOME=/tmp/home WINEPREFIX=/tmp/home/.wine WINEDEBUG=-all
+# No Mono or Gecko: their install prompts would wait forever.
+export WINEDLLOVERRIDES="mscoree,mshtml="
+mkdir -p $HOME /tmp/out
+pass=0 fail=0
+ok()  { echo "  PASS $*"; pass=$((pass+1)); }
+bad() { echo "  FAIL $*"; fail=$((fail+1)); }
+check() { if eval "$2"; then ok "$1"; else bad "$1  [$2]"; fi; }
+size() { magick identify -format '%wx%h' "$1" 2>/dev/null; }
+pastesize() { xclip -selection clipboard -t image/png -o 2>/dev/null | magick identify -format %wx%h - 2>/dev/null; }
+drag() { xdotool mousemove $1 $2 mousedown 1 mousemove $(( ($1+$3)/2 )) $(( ($2+$4)/2 )) mousemove $3 $4 mouseup 1; sleep 0.5; }
+
+Xvfb :1 -screen 0 1600x1000x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+for _ in $(seq 50); do xdpyinfo >/dev/null 2>&1 && break; sleep 0.2; done
+xsetroot -solid '#335577'; openbox >/dev/null 2>&1 &
+timeout 120 wineboot -i >/dev/null 2>&1
+C="timeout 30 wine /clipt.exe"
+echo "== $(wine --version) on Xvfb 1600x1000"
+
+out=$($C list)
+check "list: one monitor at 1600x1000 ($out)" 'echo "$out" | grep -q "^1	1600x1000+0+0"'
+$C full -o 'Z:\tmp\out\full.png'
+check "full: $(size /tmp/out/full.png)" '[ "$(size /tmp/out/full.png)" = 1600x1000 ]'
+$C screen 1 -o 'Z:\tmp\out\s1.png'
+check "screen 1: $(size /tmp/out/s1.png)" '[ "$(size /tmp/out/s1.png)" = 1600x1000 ]'
+$C full -g "10,20 300x200" -o 'Z:\tmp\out\g.png'
+check "full -g: $(size /tmp/out/g.png)" '[ "$(size /tmp/out/g.png)" = 300x200 ]'
+
+# Wine hands the Windows clipboard over to X while a Wine process runs.
+wine notepad >/dev/null 2>&1 & sleep 3
+$C full -c; sleep 1
+check "full -c: a PNG on the clipboard ($(pastesize))" '[ "$(pastesize)" = 1600x1000 ]'
+check "and a bitmap" 'xclip -selection clipboard -t TARGETS -o | grep -q image/bmp'
+
+echo "-- the editor"
+$C gui -o 'Z:\tmp\out\gui.png' & p=$!; sleep 4
+drag 200 150 900 600
+xdotool key r; sleep 0.2; drag 300 250 600 400
+xdotool key t; xdotool mousemove 400 500 click 1; sleep 0.2; xdotool type "Hello"; xdotool key Return; sleep 0.5
+magick import -window root /tmp/out/overlay.png
+red=$(magick /tmp/out/overlay.png -crop 4x80+298+280 +repage -format '%[fx:mean.r-mean.g]' info:)
+check "the rectangle shows on the overlay (red $red)" 'awk "BEGIN{exit !($red > 0.3)}"'
+xdotool key ctrl+s; wait $p
+check "Ctrl+S saves the selection ($(size /tmp/out/gui.png))" '[ "$(size /tmp/out/gui.png)" = 700x450 ]'
+$C gui & p=$!; sleep 4
+drag 100 100 420 340; xdotool key Return; wait $p; sleep 1
+check "Enter copies it ($(pastesize))" '[ "$(pastesize)" = 320x240 ]'
+$C gui & p=$!; sleep 4; xdotool key Escape; wait $p; rc=$?
+check "Esc cancels (rc=$rc)" '[ $rc = 0 ]'
+# Notepad opens at 0,0, 950x712 (with its frame).
+$C gui & p=$!; sleep 4; xdotool mousemove 500 400 sleep 0.5 click 1; sleep 0.5; xdotool key ctrl+c; wait $p; sleep 1
+check "a click picks the window under it ($(pastesize))" '[ "$(pastesize)" = 950x712 ]'
+
+echo "== $pass passed, $fail failed"
+[ $fail = 0 ]

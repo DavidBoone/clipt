@@ -25,6 +25,11 @@ on GNOME, xdotool on X11) and compare every capture against `grim`,
 ImageMagick's `import` or the expected native size, including mixed-DPI,
 fractional-scale and rotated monitors.
 
+`tests/wine.sh` cross-builds `clipt.exe` and runs it under Wine on Xvfb:
+monitors, captures, the clipboard and the editor, driven by xdotool (needs
+Docker and `rustup target add x86_64-pc-windows-gnu`). Wine isn't Windows,
+so CI's `windows` job and a real PC have the last word.
+
 Rendering changes are guarded by `partial_repaints_match_full_render`, which
 replays a session through the damage-tracked redraw path and compares every
 frame with a full redraw.
