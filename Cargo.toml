@@ -28,8 +28,8 @@ skrifa = "0.49"
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 toml = { version = "1.1", default-features = false, features = ["parse", "serde", "std"] }
 
-# The Wayland and X11 desktops: everything but macOS (Linux, the BSDs).
-[target.'cfg(not(target_os = "macos"))'.dependencies]
+# The Wayland and X11 desktops: every Unix but macOS (Linux, the BSDs).
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 futures-core = { version = "0.3", default-features = false }
 memmap2 = "0.9"
 rustix = { version = "1", features = ["fs", "pipe", "process", "shm", "time"] }
@@ -73,7 +73,7 @@ opt-level = 3
 
 # For examples/vinput.rs and testwin.rs, the Linux end-to-end tests' input
 # driver and test window.
-[target.'cfg(not(target_os = "macos"))'.dev-dependencies]
+[target.'cfg(all(unix, not(target_os = "macos")))'.dev-dependencies]
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 
 # `cargo build --profile profiling` for perf: release speed, with symbols.

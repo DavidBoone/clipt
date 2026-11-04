@@ -9,23 +9,23 @@
 //! | `portal` | GNOME and anything with xdg-desktop-portal           |
 //! | `x11`    | X11 sessions (Xfce, Cinnamon, MATE, i3, ...)         |
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 pub mod kwin;
-#[cfg(all(feature = "pipewire", not(target_os = "macos")))]
+#[cfg(all(feature = "pipewire", wayland_x11))]
 pub mod kwin_cast;
-#[cfg(all(feature = "pipewire", not(target_os = "macos")))]
+#[cfg(all(feature = "pipewire", wayland_x11))]
 pub mod mutter_cast;
-#[cfg(all(feature = "pipewire", not(target_os = "macos")))]
+#[cfg(all(feature = "pipewire", wayland_x11))]
 pub mod pipewire;
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 pub mod portal;
-#[cfg(all(feature = "pipewire", not(target_os = "macos")))]
+#[cfg(all(feature = "pipewire", wayland_x11))]
 pub mod portal_cast;
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 pub mod wayland;
 
 use crate::image::Image;
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 use anyhow::{Result, bail};
 
 /// A monitor in the compositor's logical (scaled) coordinate space.
@@ -58,12 +58,12 @@ impl Shot {
 }
 
 /// A rectangle in logical coordinates: x, y, width, height.
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 pub type LogicalRect = (f64, f64, f64, f64);
 
 /// Byte order of a video frame's pixels.
 /// The fourth byte is padding (alpha, when present, is ignored).
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PixelOrder {
     Bgrx,
@@ -72,7 +72,7 @@ pub enum PixelOrder {
 
 /// One frame of a recording: packed rows (stride = width * 4), in whatever
 /// byte order the compositor handed over, so the common case is a row copy.
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 pub struct VideoFrame {
     pub width: u32,
     pub height: u32,
@@ -80,7 +80,7 @@ pub struct VideoFrame {
     pub data: Vec<u8>,
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
     Ext,
@@ -92,20 +92,20 @@ pub enum Backend {
 }
 
 /// Which display system clipt is talking to.
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisplayKind {
     Wayland,
     X11,
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 enum Display {
     Wayland(Box<wayland::Wayland>),
     X11(Box<crate::x11::X11>),
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 impl Backend {
     pub fn parse(s: &str) -> Result<Self> {
         Ok(match s {
@@ -120,13 +120,13 @@ impl Backend {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 pub struct Capturer {
     display: Display,
     bus: Option<crate::dbus::Connection>,
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 impl Capturer {
     /// Wayland when there is a compositor to talk to, X11 otherwise.
     /// `CLIPT_X11=1` forces X11 (useful for testing under XWayland, which
@@ -251,7 +251,7 @@ impl Capturer {
 
 /// Mutter's shots, with any monitor it sent nothing for (see
 /// `mutter_cast::capture`) taken from the screenshot portal instead.
-#[cfg(all(feature = "pipewire", not(target_os = "macos")))]
+#[cfg(all(feature = "pipewire", wayland_x11))]
 fn portal_for_missing(bus: &crate::dbus::Connection, all: &[Output], outputs: &[Output], shots: Vec<Option<Shot>>) -> Result<Vec<Shot>> {
     use anyhow::Context;
     let missing: Vec<Output> = outputs.iter().zip(&shots).filter(|(_, s)| s.is_none()).map(|(o, _)| o.clone()).collect();

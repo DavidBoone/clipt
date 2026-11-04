@@ -59,7 +59,7 @@ fn resolve() -> [Option<String>; 2] {
 /// Regular and bold sans-serif paths. Asking fontconfig means spawning
 /// fc-match (~8 ms each), which dominates startup on compositors with fast
 /// capture, so the answer is cached until one of the files disappears.
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 fn resolve() -> [Option<String>; 2] {
     let cache = std::env::var_os("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
