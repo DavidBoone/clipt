@@ -126,8 +126,9 @@ pub struct Mods {
 
 pub struct Screen {
     pub output: Output,
-    /// The capture in surface byte order. The only full-size copy we keep:
-    /// the dimmed look is applied while copying it into the frame.
+    /// The capture in surface byte order. The dimmed look is applied while
+    /// copying it into the frame; the only other full-size copy is the one
+    /// `Editor::raise_window` keeps to undo with.
     pub bg: Pixmap,
     pub scale: f32,
 }
@@ -234,6 +235,8 @@ pub struct Editor {
     /// for `selected_window`: a window filling its screen has the same rect
     /// as the screen, which Tab, Ctrl+A or drawing can select too.
     clicked_window: Option<(String, Rect)>,
+    /// Each screen's `bg`, and `windows`, as they were before `raise_window`.
+    unraised: Option<(Vec<Pixmap>, Vec<crate::windows::Window>)>,
     /// Tab flips hover from the window under the pointer to its monitor.
     pub hover_screen: bool,
     /// The highlight eases between targets: where it started, where it's
@@ -287,6 +290,7 @@ impl Editor {
             fonts,
             sel: None,
             clicked_window: None,
+            unraised: None,
             shapes: Vec::new(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -1264,8 +1268,7 @@ impl Editor {
     pub fn export(&mut self) -> Option<Image> {
         self.commit_text();
         let rect = self.final_rect()?;
-        let center = (rect.left() + rect.width() / 2.0, rect.top() + rect.height() / 2.0);
-        let scale = self.screen_at(center).map_or(1.0, |i| self.screens[i].scale);
+        let scale = self.scale_at((rect.left() + rect.width() / 2.0, rect.top() + rect.height() / 2.0));
         let w = (rect.width() * scale).round().max(1.0) as u32;
         let h = (rect.height() * scale).round().max(1.0) as u32;
         let mut pm = Pixmap::new(w, h)?;
@@ -1290,9 +1293,7 @@ impl Editor {
         shapes::draw_all(&mut pm.as_mut(), &view, (w as i32, h as i32), &shapes, &self.fonts, &fill);
         let mut data = pm.take();
         if self.swap_rb {
-            for p in data.as_chunks_mut::<4>().0 {
-                p.swap(0, 2);
-            }
+            swap_rb(&mut data);
         }
         // Captures are opaque, so premultiplied == straight here.
         Some(Image { width: w, height: h, data })
@@ -1321,19 +1322,27 @@ fn snap45(a: Pt, b: Pt) -> Pt {
 }
 
 impl Editor {
-    /// Paint `img` (premultiplied RGBA, `scale` pixels per point) over the
-    /// frozen screens at `rect`, in desktop coordinates: a window captured
-    /// on its own, so the parts other windows covered show and are saved.
-    /// The caller redraws everything. macOS only so far.
+    /// Show window `id` brought to the front: `img` is it captured on its
+    /// own (premultiplied RGBA, at whatever scale the system gave), painted
+    /// over the frozen screens, so the parts other windows covered show and
+    /// are saved. One window at a time: raising another, or `lower_window`,
+    /// puts the screens back as they were. The caller redraws everything.
+    /// macOS only so far.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub fn paste(&mut self, rect: Rect, img: Image, scale: f32) {
+    pub fn raise_window(&mut self, id: &str, img: Image) {
+        self.lower_window();
+        let Some(i) = self.windows.iter().position(|w| w.id == id) else { return };
+        let w = &self.windows[i];
+        let Some(rect) = Rect::from_xywh(w.x, w.y, w.width, w.height) else { return };
+        // From the image: a window on (or across) a display of another
+        // scale than the one asked for comes back at its own.
+        let scale = img.width as f32 / rect.width();
         let mut data = img.data;
         if self.swap_rb {
-            for p in data.as_chunks_mut::<4>().0 {
-                p.swap(0, 2);
-            }
+            swap_rb(&mut data);
         }
         let Some(pm) = tiny_skia::IntSize::from_wh(img.width, img.height).and_then(|size| Pixmap::from_vec(data, size)) else { return };
+        self.unraised = Some((self.screens.iter().map(|s| s.bg.clone()).collect(), self.windows.clone()));
         for s in &mut self.screens {
             if s.bounds().intersect(&rect).is_none() {
                 continue;
@@ -1345,16 +1354,53 @@ impl Editor {
             let ty = ((rect.top() - s.output.y as f32) * s.scale).round();
             s.bg.draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_row(k, 0.0, 0.0, k, tx, ty), None);
         }
+        // Frontmost now, so clicks pick what's shown.
+        let w = self.windows.remove(i);
+        self.windows.insert(0, w);
         self.revision += 1;
+    }
+
+    /// Undo `raise_window`; false if no window was raised.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn lower_window(&mut self) -> bool {
+        let Some((bgs, windows)) = self.unraised.take() else { return false };
+        for (s, bg) in self.screens.iter_mut().zip(bgs) {
+            s.bg = bg;
+        }
+        self.windows = windows;
+        self.revision += 1;
+        true
+    }
+
+    /// Whether a window above `id` overlaps it, so raising it would show
+    /// something new.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn window_covered(&self, id: &str) -> bool {
+        let rect = |w: &crate::windows::Window| Rect::from_xywh(w.x, w.y, w.width, w.height);
+        let Some(i) = self.windows.iter().position(|w| w.id == id) else { return false };
+        let Some(r) = rect(&self.windows[i]) else { return false };
+        self.windows[..i].iter().any(|w| rect(w).and_then(|a| a.intersect(&r)).is_some())
+    }
+
+    /// Pixels per point of the screen at `p`, or the first screen's.
+    pub fn scale_at(&self, p: Pt) -> f32 {
+        self.screen_at(p).map_or(1.0, |i| self.screens[i].scale)
+    }
+}
+
+/// Swap the first and third byte of each pixel: RGBA and BGRA.
+fn swap_rb(data: &mut [u8]) {
+    for p in data.as_chunks_mut::<4>().0 {
+        p.swap(0, 2);
     }
 }
 
 fn to_pixmap(img: Image, swap_rb: bool) -> Pixmap {
     let mut data = img.data;
+    if swap_rb {
+        self::swap_rb(&mut data);
+    }
     for p in data.as_chunks_mut::<4>().0 {
-        if swap_rb {
-            p.swap(0, 2);
-        }
         p[3] = 255;
     }
     Pixmap::from_vec(data, tiny_skia::IntSize::from_wh(img.width, img.height).unwrap()).unwrap()
@@ -1390,23 +1436,40 @@ mod tests {
     }
 
     #[test]
-    fn a_pasted_window_covers_the_frozen_screen_and_is_saved() {
+    fn a_raised_window_covers_the_frozen_screen_and_is_saved() {
         // A 1x screen beside a 2x one; a 20x10-point window across both,
-        // captured at 2x, red.
+        // under another, captured at 1x (whatever scale it comes at), red.
         let mut ed = editor(vec![shot("A", 0, 100, 50, 1, [0, 0, 0]), shot("B", 100, 100, 50, 2, [0, 0, 0])], true);
-        let mut img = Image::new(40, 20);
+        let win = |x: f32, id: &str| crate::windows::Window {
+            x,
+            y: 10.0,
+            width: 20.0,
+            height: 10.0,
+            app: "a".into(),
+            title: String::new(),
+            id: id.into(),
+        };
+        ed.windows = vec![win(95.0, "cover"), win(90.0, "w")];
+        assert!(ed.window_covered("w") && !ed.window_covered("cover"));
+        let mut img = Image::new(20, 10);
         for p in img.data.as_chunks_mut::<4>().0 {
             *p = [255, 0, 0, 255];
         }
-        ed.paste(Rect::from_xywh(90.0, 10.0, 20.0, 10.0).unwrap(), img, 2.0);
+        ed.raise_window("w", img);
         // swap_rb: the background is BGRA, so red is the third byte.
         let px = |s: &Screen, x: u32, y: u32| s.bg.pixel(x, y).map(|c| (c.red(), c.blue()));
         assert_eq!(px(&ed.screens[0], 95, 15), Some((0, 255)), "on the 1x screen");
-        assert_eq!(px(&ed.screens[1], 10, 30), Some((0, 255)), "on the 2x screen, at its scale");
+        assert_eq!(px(&ed.screens[1], 18, 38), Some((0, 255)), "on the 2x screen, scaled to it");
         assert_eq!(px(&ed.screens[0], 50, 15), Some((0, 0)), "elsewhere untouched");
+        assert_eq!(ed.windows[0].id, "w", "frontmost now, for clicks");
         drag(&mut ed, (92.0, 12.0), (108.0, 18.0));
         let out = ed.export().unwrap();
         assert_eq!(&out.data[..4], &[255, 0, 0, 255], "and it's what gets saved");
+
+        assert!(ed.lower_window());
+        assert_eq!(px(&ed.screens[0], 95, 15), Some((0, 0)), "lowering puts the screen back");
+        assert_eq!(ed.windows[0].id, "cover", "and the order");
+        assert!(!ed.lower_window(), "once");
     }
 
     fn drag(ed: &mut Editor, a: Pt, b: Pt) {
