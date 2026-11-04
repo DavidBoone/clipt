@@ -76,6 +76,13 @@ opt-level = 3
 [target.'cfg(not(target_os = "macos"))'.dev-dependencies]
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 
+# CI's end-to-end builds: release speed without the fat LTO and single
+# codegen unit, which take most of a release build's time.
+[profile.ci]
+inherits = "release"
+lto = false
+codegen-units = 16
+
 # `cargo build --profile profiling` for perf: release speed, with symbols.
 [profile.profiling]
 inherits = "release"

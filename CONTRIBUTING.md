@@ -15,7 +15,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 cargo deny check          # licences and RustSec advisories
 typos
-tests/e2e.sh              # needs Docker: headless Sway (4 layouts), GNOME (2), X11 (2)
+tests/e2e.sh              # needs Docker: headless Sway (4 layouts + sound), GNOME (2), X11 (2)
 ```
 
 `tests/e2e.sh sway triple` (or any `IMAGE LAYOUT` pair) runs one suite. The

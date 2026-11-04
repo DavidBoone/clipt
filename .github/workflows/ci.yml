@@ -162,7 +162,6 @@ jobs:
   # Real compositors in containers, driven by scripted input; every capture is
   # checked against grim or the expected native size.
   e2e:
-    needs: [test]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -170,6 +169,7 @@ jobs:
       matrix:
         suite:
           - { image: sway, layout: single }
+          - { image: sway, layout: sound }
           - { image: sway, layout: frac }
           - { image: sway, layout: dual }
           - { image: sway, layout: triple }
@@ -185,7 +185,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: .github/scripts/apt-install.sh libxkbcommon-dev
-      - run: cargo build --release --locked --bin clipt --example vinput --example testwin
+      - run: cargo build --profile ci --locked --bin clipt --example vinput --example testwin
       - uses: docker/setup-buildx-action@v4
       - uses: docker/build-push-action@v7
         with:
@@ -196,3 +196,5 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.suite.image }}
       - name: run
         run: tests/e2e.sh --no-build ${{ matrix.suite.image }} ${{ matrix.suite.layout }}
+        env:
+          CLIPT_PROFILE: ci
