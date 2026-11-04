@@ -1759,13 +1759,24 @@ mod tests {
             // tiny-skia's edge antialiasing varies a little with the target size,
             // so allow small AA wobble; a missed region shows stale dim/clean
             // content or missing chrome, which is far larger.
-            let diffs: Vec<i16> =
-                buf.data().iter().zip(full.data()).map(|(a, b)| (*a as i16 - *b as i16).abs()).filter(|d| *d > 2).collect();
-            let max = diffs.iter().copied().max().unwrap_or(0);
+            let diffs: Vec<(usize, i16)> = buf
+                .data()
+                .iter()
+                .zip(full.data())
+                .map(|(a, b)| (*a as i16 - *b as i16).abs())
+                .enumerate()
+                .filter(|(_, d)| *d > 2)
+                .collect();
+            let max = diffs.iter().map(|d| d.1).max().unwrap_or(0);
+            // Where they are, for working out which layer's damage fell short.
+            let (xs, ys): (Vec<usize>, Vec<usize>) = diffs.iter().map(|(i, _)| (i / 4 % 640, i / 4 / 640)).unzip();
+            let span = |v: &[usize]| (v.iter().min().copied().unwrap_or(0), v.iter().max().copied().unwrap_or(0));
             assert!(
                 max <= 48 && diffs.len() < 400,
-                "step {n}: {} differing values, max {max}: damage tracking missed something",
-                diffs.len()
+                "step {n}: {} differing values, max {max}, in x {:?}, y {:?}: damage tracking missed something",
+                diffs.len(),
+                span(&xs),
+                span(&ys)
             );
         };
 
