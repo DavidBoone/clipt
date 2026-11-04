@@ -8,6 +8,8 @@ mod overlay;
 mod tray;
 mod windows;
 
+pub(crate) use tray::notify;
+
 use crate::config::Config;
 use crate::editor::{Editor, Outcome};
 use crate::{Args, crop_geometry, parse_geometry, stitch, write_png};

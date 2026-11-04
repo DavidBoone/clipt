@@ -440,10 +440,7 @@ pub fn run(cfg: &Config, opts: Options) -> Result<()> {
             println!("{}", target.display());
             if cfg.notify {
                 let body = format!("{}  ·  {}", target.display(), stats);
-                #[cfg(wayland_x11)]
                 crate::notify::send("Recording saved", &body, None);
-                #[cfg(target_os = "macos")]
-                crate::macos::notify("Recording saved", &body);
             }
         }
         Err(_) if path.exists() => eprintln!("clipt: the partial recording is in {}", path.display()),

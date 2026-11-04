@@ -15,7 +15,6 @@ mod icon;
 mod image;
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(wayland_x11)]
 mod notify;
 #[cfg(wayland_x11)]
 mod overlay;
