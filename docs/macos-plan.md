@@ -63,9 +63,17 @@ silicon; Intel Macs fall back to libx264), found on PATH or where Homebrew
 and MacPorts put it, since an app opened from Finder has only the system's
 PATH. `--stop` and `--pause` use the same pid file and FIFO as Linux, in
 `$TMPDIR`. The menu bar icon has Record Region, Record Screen, and while
-recording, Pause and Stop, and turns into a red record symbol. Not yet:
-a frame around the area being recorded (the main thread is busy writing,
-and AppKit draws only there), and sound, whose toggles the overlay hides.
+recording, Pause and Stop, and turns into a red record symbol. Frames
+arrive as NV12 (420v), the encoder's own format. Not yet: a frame around
+the area being recorded (the main thread is busy writing, and AppKit draws
+only there).
+
+Known limitation: while a whole Retina display is recorded, a video
+playing in an app that isn't frontmost on that display stutters, on
+screen and in the recording; QuickTime's recording of the same screen
+doesn't. It happens with the stream alone, every frame dropped on arrival,
+so it isn't the copying or the encoder. clipt is aimed at recording UI
+interactions, which it records smoothly.
 
 **Whole windows in screenshots.** The overlay shows the screen as it was
 when it opened, so a covered window would be saved covered. Clicking a
@@ -76,10 +84,10 @@ ScreenCaptureKit's `SCScreenshotManager` from macOS 14, and before that
 
 **4. Sound.** `src/macos/sound.rs`, behind the same `check`, `open` and
 `Capture::run` as PulseAudio's (`src/record/audio/pulse.rs`). `system` is
-ScreenCaptureKit's audio (macOS 13+) on a stream of its own, leaving
-clipt's own sound out; `mic` is the default input through an Audio Queue,
-which converts to 48 kHz 16-bit stereo itself (`NSMicrophoneUsageDescription`
-in Info.plist; macOS asks once). Buffers are stamped from the host clock,
+ScreenCaptureKit's audio (macOS 13+) from the picture's own stream
+(`capturesAudio`), leaving clipt's own sound out; `mic` is the default
+input through an Audio Queue, which converts to 48 kHz 16-bit stereo
+itself (`NSMicrophoneUsageDescription` in Info.plist; macOS asks once). Buffers are stamped from the host clock,
 which `Instant` runs on. Silence fills in when ScreenCaptureKit sends
 nothing. Not yet: devices by name, and `clipt list sound`.
 
