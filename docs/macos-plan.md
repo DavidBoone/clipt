@@ -62,11 +62,11 @@ covered, at the size it had when recording started. ffmpeg's
 silicon; Intel Macs fall back to libx264), found on PATH or where Homebrew
 and MacPorts put it, since an app opened from Finder has only the system's
 PATH. `--stop` and `--pause` use the same pid file and FIFO as Linux, in
-`$TMPDIR`. The menu bar icon has Record Region, Record Screen, and while
-recording, Pause and Stop, and turns into a red record symbol. Frames
-arrive as NV12 (420v), the encoder's own format. Not yet: a frame around
-the area being recorded (the main thread is busy writing, and AppKit draws
-only there).
+the user's own temporary directory (`_CS_DARWIN_USER_TEMP_DIR`). The
+menu bar icon has Record Region, Record Screen, and while recording, Pause
+and Stop, and turns into a red record symbol. Frames arrive as NV12 (420v),
+the encoder's own format. Not yet: a frame around the area being recorded
+(the main thread is busy writing, and AppKit draws only there).
 
 Known limitation: while a whole Retina display is recorded, a video
 playing in an app that isn't frontmost on that display stutters, on
