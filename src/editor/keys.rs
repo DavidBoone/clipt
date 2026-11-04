@@ -126,7 +126,8 @@ mod tests {
     #[test]
     #[cfg(not(target_os = "macos"))]
     fn readme_lists_every_shortcut() {
-        let readme = include_str!("../../README.md");
+        // Windows checkouts may have CRLF line endings.
+        let readme = include_str!("../../README.md").replace('\r', "");
         let start = "<!-- shortcuts: generated from src/editor/keys.rs -->\n";
         let end = "<!-- /shortcuts -->";
         let table = readme.split_once(start).and_then(|(_, r)| r.split_once(end)).map(|(t, _)| t);
