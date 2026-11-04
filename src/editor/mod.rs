@@ -845,9 +845,12 @@ impl Editor {
             Drag::Pending { .. } => {
                 // A click without a drag picks what's highlighted: the window
                 // under the pointer, or its whole screen. Also with something
-                // already selected, when nothing is highlighted.
+                // already selected, when nothing is highlighted. While text
+                // is being edited, a click away finishes it instead.
                 self.pointer = p;
-                if let Some((w, r)) = self.window_at(p) {
+                if self.text.is_some() {
+                    self.commit_text();
+                } else if let Some((w, r)) = self.window_at(p) {
                     self.clicked_window = Some((w.id.clone(), r));
                     self.sel = Some(r);
                 } else if let Some(i) = self.screen_at(p) {
@@ -1507,6 +1510,38 @@ mod tests {
         drag(&mut ed, (10.0, 10.0), (50.0, 50.0));
         assert_eq!(ed.sel.unwrap().width(), 400.0);
         assert!(ed.selected_window().is_none(), "drawing selected the screen");
+    }
+
+    /// A click away from text being edited finishes it and keeps the
+    /// selection, rather than picking the window clicked.
+    #[test]
+    fn click_while_editing_text_keeps_the_selection() {
+        let mut ed = editor(vec![shot("A", 0, 400, 300, 1, [0, 0, 0])], false);
+        let win = |x: f32, id: &str| crate::windows::Window {
+            x,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            app: "a".into(),
+            title: String::new(),
+            id: id.into(),
+        };
+        ed.windows = vec![win(0.0, "1"), win(200.0, "2")];
+        let click = |ed: &mut Editor, p: Pt| {
+            ed.pointer_motion(p, Mods::default());
+            ed.button_press(p, true, Mods::default());
+            ed.button_release(p, true);
+        };
+        click(&mut ed, (50.0, 50.0));
+        let first = ed.sel;
+        ed.tool = Tool::Text;
+        click(&mut ed, (50.0, 50.0));
+        ed.key(Key::Char('h'), Mods::default());
+        assert!(ed.text.is_some());
+        ed.tool = Tool::Select;
+        click(&mut ed, (250.0, 50.0));
+        assert!(ed.text.is_none(), "the text is finished");
+        assert_eq!(ed.sel, first, "and the selection kept");
     }
 
     /// The screenshot overlay switches to record mode and back with Ctrl+R
