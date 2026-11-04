@@ -713,7 +713,7 @@ fn hint_width(ed: &Editor) -> f32 {
     let items = hint_items(ed);
     let mut w = 16.0;
     for (i, (k, t)) in items.iter().enumerate() {
-        w += text::measure(&ed.fonts.regular, CAP_FS, k) + 14.0 + 8.0 + text::measure(&ed.fonts.regular, HINT_FS, t);
+        w += cap_width(ed, k) + 8.0 + text::measure(&ed.fonts.regular, HINT_FS, t);
         if i + 1 < items.len() {
             w += 22.0;
         }
@@ -765,12 +765,18 @@ const HELP_COL_GAP: f32 = 40.0;
 const HELP_FOOT: f32 = 34.0;
 
 struct HelpLayout {
+    /// Where it is on the desktop, shrunk to fit the screen if need be.
     panel: Rect,
+    /// How much it's shrunk: everything else is laid out at full size,
+    /// from (0, 0), and drawn scaled by this.
+    k: f32,
+    size: (f32, f32),
     groups: Vec<keys::Group>,
     /// Each group's top-left, and its column's key cap width.
     at: Vec<(Pt, f32)>,
 }
 
+/// A key cap's width; `key_cap` draws it 22 high.
 fn cap_width(ed: &Editor, k: &str) -> f32 {
     text::measure(&ed.fonts.regular, CAP_FS, k) + 14.0
 }
@@ -785,8 +791,8 @@ fn help_layout(ed: &Editor) -> Option<HelpLayout> {
     let b = ed.screens.get(ed.help?)?.bounds();
     let groups = keys::sheet(ed.record, ed.can_switch, !ed.windows.is_empty());
     let ncol = groups.iter().map(|g| g.column + 1).max().unwrap_or(1);
-    // Per column: key cap width, whole width, height.
-    let mut cols = vec![(0.0f32, 0.0f32, 0.0f32); ncol];
+    // Each column's key cap width and description width.
+    let mut cols = vec![(0.0f32, 0.0f32); ncol];
     for g in &groups {
         let c = &mut cols[g.column];
         for (k, t) in &g.keys {
@@ -795,21 +801,13 @@ fn help_layout(ed: &Editor) -> Option<HelpLayout> {
         }
         c.1 = c.1.max(text::measure(ed.fonts.bold(), HINT_FS, g.title));
     }
-    for g in &groups {
-        let c = &mut cols[g.column];
-        c.2 += if c.2 > 0.0 { HELP_GAP } else { 0.0 } + HELP_GROUP + g.keys.len() as f32 * HELP_ROW;
-    }
-    let col_w: Vec<f32> = cols.iter().map(|&(cap, w, _)| cap + 12.0 + w.max(0.0)).collect();
-    let w = 2.0 * HELP_PAD + col_w.iter().sum::<f32>() + HELP_COL_GAP * (ncol - 1) as f32;
-    let h = 2.0 * HELP_PAD + HELP_TITLE + cols.iter().map(|c| c.2).fold(0.0, f32::max) + HELP_FOOT;
-    let panel = Rect::from_xywh(b.left() + (b.width() - w) / 2.0, b.top() + ((b.height() - h) / 2.0).max(0.0), w, h)?;
-    let mut x = panel.left() + HELP_PAD;
     let mut col_x = Vec::new();
-    for w in &col_w {
+    let mut x = HELP_PAD;
+    for &(cap, w) in &cols {
         col_x.push(x);
-        x += w + HELP_COL_GAP;
+        x += cap + 12.0 + w + HELP_COL_GAP;
     }
-    let top = panel.top() + HELP_PAD + HELP_TITLE;
+    let top = HELP_PAD + HELP_TITLE;
     let mut y = vec![top; ncol];
     let mut at = Vec::new();
     for g in &groups {
@@ -820,19 +818,27 @@ fn help_layout(ed: &Editor) -> Option<HelpLayout> {
         at.push(((col_x[c], y[c]), cols[c].0));
         y[c] += HELP_GROUP + g.keys.len() as f32 * HELP_ROW;
     }
-    Some(HelpLayout { panel, groups, at })
+    let (w, h) = (x - HELP_COL_GAP + HELP_PAD, y.iter().fold(0.0f32, |a, &b| a.max(b)) + HELP_FOOT + HELP_PAD);
+    // Shrink it on small screens (a laptop at 200 % is 960 × 540 logical).
+    let k = ((b.width() - 32.0) / w).min((b.height() - 32.0) / h).min(1.0);
+    let panel = Rect::from_xywh(b.left() + (b.width() - w * k) / 2.0, b.top() + (b.height() - h * k) / 2.0, w * k, h * k)?;
+    Some(HelpLayout { panel, k, size: (w, h), groups, at })
 }
 
 fn draw_help(ed: &Editor, pm: &mut PixmapMut, view: &View) {
     let Some(l) = help_layout(ed) else { return };
-    let s = view.scale;
+    // Draw in the layout's own coordinates: (0, 0) at the panel's corner,
+    // scaled by `l.k`.
+    let a = (l.panel.left(), l.panel.top());
+    let view = &View { ox: (view.ox - a.0) / l.k, oy: (view.oy - a.1) / l.k, scale: view.scale * l.k, ..*view };
+    let Some(panel) = Rect::from_xywh(0.0, 0.0, l.size.0, l.size.1) else { return };
     // Opaque, unlike the other cards: the selection and toolbar showing
     // through would make the list hard to read.
     let id = Transform::identity();
-    pm.fill_path(&rounded(view, l.panel, 16.0), &view.paint(Color::from_rgba8(0x1c, 0x1c, 0x1e, 255)), FillRule::Winding, id, None);
-    card(pm, view, l.panel, 16.0);
+    pm.fill_path(&rounded(view, panel, 16.0), &view.paint(Color::from_rgba8(0x1c, 0x1c, 0x1e, 255)), FillRule::Winding, id, None);
+    card(pm, view, panel, 16.0);
     let title = if ed.record { "Recording shortcuts" } else { "Shortcuts" };
-    label(ed, pm, view, (l.panel.left() + HELP_PAD, l.panel.top() + HELP_PAD - 4.0), 17.0, title, Color::WHITE, true);
+    label(ed, pm, view, (HELP_PAD, HELP_PAD - 4.0), 17.0, title, Color::WHITE, true);
     for (g, &((x, y), capw)) in l.groups.iter().zip(&l.at) {
         label(ed, pm, view, (x, y + 4.0), HINT_FS, g.title, ACCENT(), true);
         for (i, (k, t)) in g.keys.iter().enumerate() {
@@ -842,16 +848,15 @@ fn draw_help(ed: &Editor, pm: &mut PixmapMut, view: &View) {
         }
     }
     let foot = "Any key or click closes this";
-    let fw = text::measure(&ed.fonts.regular, CAP_FS * s, foot) / s;
-    let fy = l.panel.bottom() - HELP_PAD - 14.0;
-    label(ed, pm, view, (l.panel.left() + (l.panel.width() - fw) / 2.0, fy), CAP_FS, foot, MUTED(), false);
+    let fw = text::measure(&ed.fonts.regular, CAP_FS, foot);
+    label(ed, pm, view, ((l.size.0 - fw) / 2.0, l.size.1 - HELP_PAD - 14.0), CAP_FS, foot, MUTED(), false);
 }
 
 /// A key cap: `k` in a faint rounded box 22 high, its top-left at `at`.
 fn key_cap(ed: &Editor, pm: &mut PixmapMut, view: &View, at: Pt, k: &str) -> f32 {
     let s = view.scale;
     let id = Transform::identity();
-    let kw = text::measure(&ed.fonts.regular, CAP_FS * s, k) / s + 14.0;
+    let kw = cap_width(ed, k);
     if let Some(cap) = Rect::from_xywh(at.0, at.1, kw, 22.0) {
         let path = rounded(view, cap, 6.0);
         pm.fill_path(&path, &view.paint(Color::from_rgba8(255, 255, 255, 22)), FillRule::Winding, id, None);

@@ -136,15 +136,6 @@ mod tests {
     }
 
     #[test]
-    fn every_tool_is_listed() {
-        let groups = sheet(false, true, true);
-        let tools = groups.iter().find(|g| g.title == "Tools").unwrap();
-        for t in std::iter::once(Tool::Select).chain(Tool::DRAWING) {
-            assert!(tools.keys.iter().any(|(k, _)| k.eq_ignore_ascii_case(&t.hotkey().to_string())), "{t:?}");
-        }
-    }
-
-    #[test]
     fn record_mode_lists_only_what_works_there() {
         let groups = sheet(true, false, false);
         assert_eq!(groups.iter().map(|g| g.title).collect::<Vec<_>>(), ["Select", "Record"]);

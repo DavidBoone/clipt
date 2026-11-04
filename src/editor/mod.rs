@@ -253,6 +253,8 @@ pub struct Editor {
     pub width_hint: bool,
     /// The `?` sheet of shortcuts, open on this screen.
     pub help: Option<usize>,
+    /// The last `?`, to tell a held key's repeats from a second press.
+    help_key_at: Option<std::time::Instant>,
     /// Bumped whenever committed shapes change; forces a full redraw.
     revision: u64,
     drawn_revision: Option<u64>,
@@ -306,6 +308,7 @@ impl Editor {
             last_click: None,
             width_hint: false,
             help: None,
+            help_key_at: None,
             revision: 0,
             drawn_revision: None,
             drawn_sel: None,
@@ -856,6 +859,9 @@ impl Editor {
     }
 
     pub fn scroll(&mut self, dy: f32) -> bool {
+        if self.help.take().is_some() {
+            return true;
+        }
         if self.record {
             return false;
         }
@@ -868,7 +874,12 @@ impl Editor {
     }
 
     pub fn key(&mut self, key: Key, mods: Mods) -> bool {
-        // Any key closes the shortcut sheet; Esc there mustn't also cancel.
+        if key == Key::Char('?') && !mods.ctrl && self.picker.is_none() && self.text.is_none() {
+            self.help_key();
+            return true;
+        }
+        // Any other key closes the shortcut sheet; Esc there mustn't also
+        // cancel.
         if self.help.take().is_some() {
             return true;
         }
@@ -895,10 +906,6 @@ impl Editor {
             return true;
         }
 
-        if key == Key::Char('?') && !mods.ctrl {
-            self.help = Some(self.screen_at(self.pointer).unwrap_or(0));
-            return true;
-        }
         if mods.ctrl && matches!(key, Key::Char('r' | 'R')) && self.can_switch {
             self.switch_mode();
             return true;
@@ -967,6 +974,21 @@ impl Editor {
             Key::Delete | Key::Tab => return false,
         }
         true
+    }
+
+    /// `?` opens the sheet of shortcuts, or closes it. Hosts repeat a held
+    /// key, which would flicker it open and shut: a `?` soon after another
+    /// is taken as a repeat. Not mid-drag, where it would hide the drag.
+    fn help_key(&mut self) {
+        let now = std::time::Instant::now();
+        let repeat = self.help_key_at.is_some_and(|t| now.duration_since(t).as_millis() < 700);
+        self.help_key_at = Some(now);
+        if repeat {
+            return;
+        }
+        if self.help.take().is_none() && matches!(self.drag, Drag::None) {
+            self.help = Some(self.screen_at(self.pointer).unwrap_or(0));
+        }
     }
 
     /// Between screenshot and record mode. Annotations stay, but aren't shown
@@ -2091,6 +2113,8 @@ mod tests {
     fn question_mark_shows_the_shortcuts() {
         let mut ed = editor(vec![shot("A", 0, 1366, 768, 1, [0, 0, 0]), shot("B", 1366, 1366, 768, 1, [0, 0, 0])], false);
         let m = Mods::default();
+        // As if the last ? was a while ago: a quick second one is a repeat.
+        let earlier = || std::time::Instant::now().checked_sub(std::time::Duration::from_secs(1));
         drag(&mut ed, (100.0, 100.0), (300.0, 300.0));
         ed.pointer_motion((2000.0, 400.0), m);
         assert!(ed.key(Key::Char('?'), Mods { shift: true, ..m }));
@@ -2098,9 +2122,14 @@ mod tests {
         let r = ui::help_rect(&ed).unwrap();
         let b = ed.screens[1].bounds();
         assert!(r.left() >= b.left() && r.right() <= b.right() && r.bottom() <= b.bottom(), "fits a 1366×768 screen: {r:?}");
+        let mut small = editor(vec![shot("A", 0, 960, 540, 2, [0, 0, 0])], false);
+        small.key(Key::Char('?'), m);
+        let r = ui::help_rect(&small).unwrap();
+        assert!(r.left() >= 0.0 && r.top() >= 0.0 && r.right() <= 960.0 && r.bottom() <= 540.0, "shrinks to fit 1920×1080 at 200 %: {r:?}");
         ed.key(Key::Escape, m);
         assert_eq!((ed.help, ed.outcome), (None, None));
 
+        ed.help_key_at = earlier();
         ed.key(Key::Char('?'), m);
         let sel = ed.sel;
         ed.button_press((150.0, 150.0), false, m);
@@ -2108,9 +2137,24 @@ mod tests {
 
         ed.can_switch = true;
         ed.key(Key::Char('r'), Mods { ctrl: true, ..m });
+        ed.help_key_at = earlier();
         assert!(ed.key(Key::Char('?'), m) && ed.help.is_some(), "record mode has one too");
         ed.key(Key::Char('?'), m);
+        ed.key(Key::Char('?'), m);
+        assert!(ed.help.is_some(), "a held ? repeats; that doesn't close it");
+        ed.help_key_at = earlier();
+        ed.key(Key::Char('?'), m);
         assert!(ed.help.is_none(), "? again closes it");
+
+        ed.help_key_at = earlier();
+        ed.key(Key::Char('?'), m);
+        let w = ed.width;
+        assert!(ed.scroll(1.0) && ed.help.is_none() && ed.width == w, "scrolling only closed it");
+        ed.button_press((150.0, 150.0), true, m);
+        ed.help_key_at = earlier();
+        ed.key(Key::Char('?'), m);
+        assert!(ed.help.is_none(), "not mid-drag");
+        ed.button_release((150.0, 150.0), true);
 
         ed.key(Key::Char('r'), Mods { ctrl: true, ..m });
         ed.set_tool(Tool::Text);
