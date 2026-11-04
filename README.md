@@ -9,8 +9,8 @@ the screen, drag a region, annotate it, copy or save. It also records the screen
 a region or a window to MP4 or GIF. One small Rust binary, no Qt/GTK,
 CPU-rendered with tiny-skia.
 
-![clipt's editor: a selection with its size label, a rectangle, an arrow,
-numbered counters, a highlighter, text and the toolbar](docs/screenshot.png)
+![clipt's editor over GNOME Settings: a selection with its size label, a
+rectangle, numbered counters, an arrow, text and the toolbar](docs/screenshot.png)
 
 ## Quick start
 

@@ -20,10 +20,13 @@ for row, base in (("qwertyuiop", 16), ("asdfghjkl", 30), ("zxcvbnm", 44), ("1234
     for i, c in enumerate(row):
         KEYS[c] = base + i
 KEYS[" "] = 57
+SHIFTED = {"%": "5", "!": "1"}
 
 def key(code, down):
     call(session, S, "NotifyKeyboardKeycode", (code, down), "(ub)")
 def tap(name, ctrl=False):
+    if name in SHIFTED:
+        key(KEYS["shift"], True); tap(SHIFTED[name], ctrl); key(KEYS["shift"], False); return
     shift = len(name) == 1 and name.isupper()
     code = KEYS[name.lower() if len(name) == 1 else name]
     if ctrl: key(KEYS["ctrl"], True)
