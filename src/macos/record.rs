@@ -17,7 +17,6 @@ use objc2::runtime::{AnyClass, ProtocolObject};
 use objc2::{AllocAnyThread, DefinedClass, MainThreadMarker, define_class, msg_send, sel};
 use objc2_app_kit::NSApplication;
 use objc2_core_foundation::{CFDictionary, CGPoint, CGRect, CGSize};
-use objc2_core_graphics::CGDisplayBounds;
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::{
     CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
@@ -194,13 +193,11 @@ pub(crate) fn capture(target: &Target, cursor: bool, interval: Duration) -> Resu
         }
         t => {
             let (out, crop) = crate::record::resolve_target(&outputs, t)?;
+            let id = super::capture::display_ids()?.get(out.index).copied();
             let displays = unsafe { content.displays() };
             let display = displays
                 .iter()
-                .find(|d| {
-                    let b = CGDisplayBounds(unsafe { d.displayID() });
-                    (b.origin.x.round() as i32, b.origin.y.round() as i32) == (out.x, out.y)
-                })
+                .find(|d| Some(unsafe { d.displayID() }) == id)
                 .with_context(|| format!("ScreenCaptureKit doesn't list display {}", out.name))?;
             let (x, y, w, h) = crop.unwrap_or((0.0, 0.0, out.width as f64, out.height as f64));
             crate::record::debug(&format!("recording {w}x{h} at {x},{y} of display {}", out.name));

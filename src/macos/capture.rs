@@ -40,12 +40,8 @@ pub fn ensure_permission() -> Result<()> {
 /// Core Graphics uses: points, origin at the main display's top left, y down.
 /// That's the space the editor works in, so no conversion is needed.
 pub fn outputs(mtm: MainThreadMarker) -> Result<Vec<Output>> {
-    let mut ids = [0 as CGDirectDisplayID; 32];
-    let mut n = 0u32;
-    let err = unsafe { CGGetActiveDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut n) };
-    ensure!(err == CGError::Success, "listing displays failed (CGError {})", err.0);
     let names = screen_names(mtm);
-    Ok(ids[..n as usize]
+    Ok(display_ids()?
         .iter()
         .enumerate()
         .map(|(index, &id)| {
@@ -65,6 +61,16 @@ pub fn outputs(mtm: MainThreadMarker) -> Result<Vec<Output>> {
             }
         })
         .collect())
+}
+
+/// The active displays' ids, in the order `outputs` numbers them
+/// (`Output::index`).
+pub fn display_ids() -> Result<Vec<CGDirectDisplayID>> {
+    let mut ids = [0 as CGDirectDisplayID; 32];
+    let mut n = 0u32;
+    let err = unsafe { CGGetActiveDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut n) };
+    ensure!(err == CGError::Success, "listing displays failed (CGError {})", err.0);
+    Ok(ids[..n as usize].to_vec())
 }
 
 /// Display ids and the names System Settings shows ("Built-in Retina
@@ -97,14 +103,6 @@ pub fn capture(outputs: &[Output], cursor: bool) -> Result<Vec<Shot>> {
             Ok(Shot { output: o.clone(), image })
         })
         .collect()
-}
-
-fn display_ids() -> Result<Vec<CGDirectDisplayID>> {
-    let mut ids = [0 as CGDirectDisplayID; 32];
-    let mut n = 0u32;
-    let err = unsafe { CGGetActiveDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut n) };
-    ensure!(err == CGError::Success, "listing displays failed (CGError {})", err.0);
-    Ok(ids[..n as usize].to_vec())
 }
 
 type CreateImage = unsafe extern "C" fn(CGDirectDisplayID) -> Option<NonNull<CGImage>>;
