@@ -13,9 +13,9 @@
 //! Positions are in the same logical desktop coordinates as the outputs. The
 //! list is topmost first.
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 mod linux;
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 pub use linux::{install_gnome_extension, list};
 
 #[derive(Clone, Debug)]

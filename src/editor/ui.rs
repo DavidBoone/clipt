@@ -2,6 +2,7 @@
 //! Everything is laid out in logical units and multiplied by the output scale,
 //! so the chrome stays crisp on HiDPI screens.
 
+use super::keys::{self, cmd};
 use super::shapes::{Pt, RectExt, Shape, Tool, View};
 use super::{Editor, PALETTE, hsv_to_rgb};
 use crate::text;
@@ -251,13 +252,17 @@ pub fn dynamic_layers(ed: &Editor, frame: u64) -> Vec<Layer> {
     layers.push(Layer { key: if visible { key(&[p.0, p.1]) } else { 0 }, rects: grow(rects) });
 
     // hint pill
-    let hint = ed.sel.is_none() && !ed.is_adjusting();
-    let rects = if hint {
-        ed.screens.iter().map(|s| hint_rect(ed, s.bounds()).and_then(|r| inflate(r, CARD_SHADOW))).collect()
-    } else {
-        Vec::new()
-    };
-    layers.push(Layer { key: hint as u64 + 2 * !ed.windows.is_empty() as u64 + 4 * ed.record as u64, rects: grow(rects) });
+    let rects: Vec<Rect> = ed.screens.iter().filter_map(|s| hint_rect(ed, s.bounds())).collect();
+    let mut parts: Vec<f32> = rects.iter().flat_map(|r| rect_key(Some(*r))).collect();
+    parts.extend(hint_items(ed).iter().flat_map(|(k, t)| k.chars().chain(t.chars())).map(|c| c as u32 as f32));
+    layers.push(Layer { key: key(&parts), rects: grow(rects.into_iter().map(|r| inflate(r, CARD_SHADOW)).collect()) });
+
+    // the ? sheet
+    let r = help_rect(ed);
+    layers.push(Layer {
+        key: key(&[rect_key(r).as_slice(), &[ed.record as u8 as f32]].concat()),
+        rects: grow(vec![r.and_then(|r| inflate(r, CARD_SHADOW))]),
+    });
 
     // Screenshot | Video switch
     let rects: Vec<Option<Rect>> =
@@ -392,9 +397,7 @@ pub fn render(ed: &Editor, idx: usize, pm: &mut PixmapMut, origin: (i32, i32)) {
         draw_loupe(ed, idx, pm, &view, &sv, bounds);
     }
 
-    if ed.sel.is_none() && !ed.is_adjusting() {
-        draw_hint(ed, pm, &view, bounds);
-    }
+    draw_hint(ed, pm, &view, bounds);
     draw_mode_switch(ed, pm, &view, bounds);
 
     if let Some((panel, btns)) = toolbar_layout(ed)
@@ -410,6 +413,9 @@ pub fn render(ed: &Editor, idx: usize, pm: &mut PixmapMut, origin: (i32, i32)) {
         let r = Rect::from_xywh(ed.pointer.0 + 16.0, ed.pointer.1 + 16.0, w, 26.0).unwrap();
         pill(pm, &view, r, 13.0);
         label(ed, pm, &view, (r.left() + 10.0, r.top() + 5.0), 13.0, &t, ICON(), false);
+    }
+    if ed.help == Some(idx) {
+        draw_help(ed, pm, &view);
     }
 }
 
@@ -669,20 +675,34 @@ fn draw_mode_switch(ed: &Editor, pm: &mut PixmapMut, view: &View, b: Rect) {
     }
 }
 
-/// (key cap, what it does) for the hint bar.
+/// (key cap, what it does) for the hint bar: how to select before there's
+/// a selection, then how to finish until something is drawn. Empty when
+/// it's not shown.
 fn hint_items(ed: &Editor) -> Vec<(&'static str, &'static str)> {
-    if ed.record {
-        return if ed.windows.is_empty() {
-            vec![("Drag", "Area to record"), ("Click", "Screen"), ("Enter", "Record"), ("Esc", "Cancel")]
-        } else {
-            vec![("Drag", "Area to record"), ("Click", "Window"), ("Tab", "Screen"), ("Enter", "Record"), ("Esc", "Cancel")]
-        };
+    if ed.help.is_some() || ed.is_adjusting() || ed.picker.is_some() || ed.text.is_some() {
+        return Vec::new();
     }
-    if ed.windows.is_empty() {
-        vec![("Drag", "Select area"), ("Click", "Screen"), ("Esc", "Cancel")]
-    } else {
-        vec![("Drag", "Select area"), ("Click", "Window"), ("Tab", "Screen"), ("Esc", "Cancel")]
-    }
+    let windows = !ed.windows.is_empty();
+    let mut items = match (ed.sel.is_some(), ed.record) {
+        (false, record) => {
+            let mut v = vec![("Drag", if record { "Area to record" } else { "Select area" })];
+            v.push(("Click", if windows { "Window" } else { "Screen" }));
+            if windows {
+                v.push(("Tab", "Screen"));
+            }
+            if record {
+                v.push(("Enter", "Record"));
+            }
+            v
+        }
+        (true, true) => vec![("Enter", "Record"), ("Right-click", "Select again")],
+        (true, false) if ed.shapes.is_empty() && ed.selected.is_none() => {
+            vec![("Enter", "Copy"), (cmd!("S"), "Save"), ("Right-click", "Select again")]
+        }
+        (true, false) => return Vec::new(),
+    };
+    items.extend([("Esc", "Cancel"), ("?", "Shortcuts")]);
+    items
 }
 
 const HINT_FS: f32 = 13.0;
@@ -693,7 +713,7 @@ fn hint_width(ed: &Editor) -> f32 {
     let items = hint_items(ed);
     let mut w = 16.0;
     for (i, (k, t)) in items.iter().enumerate() {
-        w += text::measure(&ed.fonts.regular, CAP_FS, k) + 14.0 + 8.0 + text::measure(&ed.fonts.regular, HINT_FS, t);
+        w += cap_width(ed, k) + 8.0 + text::measure(&ed.fonts.regular, HINT_FS, t);
         if i + 1 < items.len() {
             w += 22.0;
         }
@@ -701,28 +721,30 @@ fn hint_width(ed: &Editor) -> f32 {
     w + 16.0
 }
 
-fn hint_rect(ed: &Editor, b: Rect) -> Option<Rect> {
+/// At the top of screen `b`, or at the bottom when that would cover the
+/// selection or the toolbar; None if it would cover them there too.
+pub(super) fn hint_rect(ed: &Editor, b: Rect) -> Option<Rect> {
+    if hint_items(ed).is_empty() {
+        return None;
+    }
     let w = hint_width(ed);
-    Rect::from_xywh(b.left() + (b.width() - w) / 2.0, b.top() + 24.0, w, HINT_H)
+    let x = b.left() + (b.width() - w) / 2.0;
+    let low = mode_switch_layout(ed, b).map_or(b.bottom() - 24.0, |(p, _)| p.top() - 12.0) - HINT_H;
+    // The selection's size label sits just above it.
+    let sel = ed.sel.and_then(|r| Rect::from_ltrb(r.left() - 8.0, r.top() - 36.0, r.right() + 8.0, r.bottom() + 8.0));
+    let toolbar = toolbar_layout(ed).map(|(p, _)| p);
+    let clear = |r: &Rect| [sel, toolbar].iter().flatten().all(|o| r.intersect(o).is_none());
+    [b.top() + 24.0, low].into_iter().filter_map(|y| Rect::from_xywh(x, y, w, HINT_H)).find(clear)
 }
 
 fn draw_hint(ed: &Editor, pm: &mut PixmapMut, view: &View, b: Rect) {
     let Some(r) = hint_rect(ed, b) else { return };
     let s = view.scale;
     card(pm, view, r, HINT_H / 2.0);
-    let id = Transform::identity();
     let mut x = r.left() + 16.0;
     let items = hint_items(ed);
     for (i, (k, t)) in items.iter().enumerate() {
-        let kw = text::measure(&ed.fonts.regular, CAP_FS * s, k) / s + 14.0;
-        if let Some(cap) = Rect::from_xywh(x, r.top() + 9.0, kw, 22.0) {
-            let path = rounded(view, cap, 6.0);
-            pm.fill_path(&path, &view.paint(Color::from_rgba8(255, 255, 255, 22)), FillRule::Winding, id, None);
-            let st = Stroke { width: s.max(1.0), ..Default::default() };
-            pm.stroke_path(&path, &view.paint(Color::from_rgba8(255, 255, 255, 46)), &st, id, None);
-            label(ed, pm, view, (x + 7.0, cap.top() + 4.0), CAP_FS, k, Color::from_rgba8(255, 255, 255, 230), false);
-        }
-        x += kw + 8.0;
+        x += key_cap(ed, pm, view, (x, r.top() + 9.0), k) + 8.0;
         label(ed, pm, view, (x, r.top() + 11.5), HINT_FS, t, SECONDARY(), false);
         x += text::measure(&ed.fonts.regular, HINT_FS * s, t) / s;
         if i + 1 < items.len() {
@@ -730,6 +752,119 @@ fn draw_hint(ed: &Editor, pm: &mut PixmapMut, view: &View, b: Rect) {
             x += 22.0;
         }
     }
+}
+
+// ---- the ? sheet ----------------------------------------------------------
+
+const HELP_PAD: f32 = 28.0;
+const HELP_TITLE: f32 = 40.0;
+const HELP_GROUP: f32 = 30.0;
+const HELP_ROW: f32 = 28.0;
+const HELP_GAP: f32 = 14.0;
+const HELP_COL_GAP: f32 = 40.0;
+const HELP_FOOT: f32 = 34.0;
+
+struct HelpLayout {
+    /// Where it is on the desktop, shrunk to fit the screen if need be.
+    panel: Rect,
+    /// How much it's shrunk: everything else is laid out at full size,
+    /// from (0, 0), and drawn scaled by this.
+    k: f32,
+    size: (f32, f32),
+    groups: Vec<keys::Group>,
+    /// Each group's top-left, and its column's key cap width.
+    at: Vec<(Pt, f32)>,
+}
+
+/// A key cap's width; `key_cap` draws it 22 high.
+fn cap_width(ed: &Editor, k: &str) -> f32 {
+    text::measure(&ed.fonts.regular, CAP_FS, k) + 14.0
+}
+
+/// Where the `?` sheet is, if it's open.
+pub(super) fn help_rect(ed: &Editor) -> Option<Rect> {
+    help_layout(ed).map(|l| l.panel)
+}
+
+/// The sheet, centred on the screen it was opened on.
+fn help_layout(ed: &Editor) -> Option<HelpLayout> {
+    let b = ed.screens.get(ed.help?)?.bounds();
+    let groups = keys::sheet(ed.record, ed.can_switch, !ed.windows.is_empty());
+    let ncol = groups.iter().map(|g| g.column + 1).max().unwrap_or(1);
+    // Each column's key cap width and description width.
+    let mut cols = vec![(0.0f32, 0.0f32); ncol];
+    for g in &groups {
+        let c = &mut cols[g.column];
+        for (k, t) in &g.keys {
+            c.0 = c.0.max(cap_width(ed, k));
+            c.1 = c.1.max(text::measure(&ed.fonts.regular, HINT_FS, t));
+        }
+        c.1 = c.1.max(text::measure(ed.fonts.bold(), HINT_FS, g.title));
+    }
+    let mut col_x = Vec::new();
+    let mut x = HELP_PAD;
+    for &(cap, w) in &cols {
+        col_x.push(x);
+        x += cap + 12.0 + w + HELP_COL_GAP;
+    }
+    let top = HELP_PAD + HELP_TITLE;
+    let mut y = vec![top; ncol];
+    let mut at = Vec::new();
+    for g in &groups {
+        let c = g.column;
+        if y[c] > top {
+            y[c] += HELP_GAP;
+        }
+        at.push(((col_x[c], y[c]), cols[c].0));
+        y[c] += HELP_GROUP + g.keys.len() as f32 * HELP_ROW;
+    }
+    let (w, h) = (x - HELP_COL_GAP + HELP_PAD, y.iter().fold(0.0f32, |a, &b| a.max(b)) + HELP_FOOT + HELP_PAD);
+    // Shrink it on small screens (a laptop at 200 % is 960 × 540 logical).
+    let k = ((b.width() - 32.0) / w).min((b.height() - 32.0) / h).min(1.0);
+    let panel = Rect::from_xywh(b.left() + (b.width() - w * k) / 2.0, b.top() + (b.height() - h * k) / 2.0, w * k, h * k)?;
+    Some(HelpLayout { panel, k, size: (w, h), groups, at })
+}
+
+fn draw_help(ed: &Editor, pm: &mut PixmapMut, view: &View) {
+    let Some(l) = help_layout(ed) else { return };
+    // Draw in the layout's own coordinates: (0, 0) at the panel's corner,
+    // scaled by `l.k`.
+    let a = (l.panel.left(), l.panel.top());
+    let view = &View { ox: (view.ox - a.0) / l.k, oy: (view.oy - a.1) / l.k, scale: view.scale * l.k, ..*view };
+    let Some(panel) = Rect::from_xywh(0.0, 0.0, l.size.0, l.size.1) else { return };
+    // Opaque, unlike the other cards: the selection and toolbar showing
+    // through would make the list hard to read.
+    let id = Transform::identity();
+    pm.fill_path(&rounded(view, panel, 16.0), &view.paint(Color::from_rgba8(0x1c, 0x1c, 0x1e, 255)), FillRule::Winding, id, None);
+    card(pm, view, panel, 16.0);
+    let title = if ed.record { "Recording shortcuts" } else { "Shortcuts" };
+    label(ed, pm, view, (HELP_PAD, HELP_PAD - 4.0), 17.0, title, Color::WHITE, true);
+    for (g, &((x, y), capw)) in l.groups.iter().zip(&l.at) {
+        label(ed, pm, view, (x, y + 4.0), HINT_FS, g.title, ACCENT(), true);
+        for (i, (k, t)) in g.keys.iter().enumerate() {
+            let ry = y + HELP_GROUP + i as f32 * HELP_ROW;
+            key_cap(ed, pm, view, (x, ry), k);
+            label(ed, pm, view, (x + capw + 12.0, ry + 2.5), HINT_FS, t, SECONDARY(), false);
+        }
+    }
+    let foot = "Any key or click closes this";
+    let fw = text::measure(&ed.fonts.regular, CAP_FS, foot);
+    label(ed, pm, view, ((l.size.0 - fw) / 2.0, l.size.1 - HELP_PAD - 14.0), CAP_FS, foot, MUTED(), false);
+}
+
+/// A key cap: `k` in a faint rounded box 22 high, its top-left at `at`.
+fn key_cap(ed: &Editor, pm: &mut PixmapMut, view: &View, at: Pt, k: &str) -> f32 {
+    let s = view.scale;
+    let id = Transform::identity();
+    let kw = cap_width(ed, k);
+    if let Some(cap) = Rect::from_xywh(at.0, at.1, kw, 22.0) {
+        let path = rounded(view, cap, 6.0);
+        pm.fill_path(&path, &view.paint(Color::from_rgba8(255, 255, 255, 22)), FillRule::Winding, id, None);
+        let st = Stroke { width: s.max(1.0), ..Default::default() };
+        pm.stroke_path(&path, &view.paint(Color::from_rgba8(255, 255, 255, 46)), &st, id, None);
+        label(ed, pm, view, (at.0 + 7.0, at.1 + 4.0), CAP_FS, k, Color::from_rgba8(255, 255, 255, 230), false);
+    }
+    kw
 }
 
 /// Size in physical pixels: that's what the saved file will be.
@@ -1018,33 +1153,21 @@ fn draw_picker(ed: &Editor, pm: &mut PixmapMut, view: &View) {
 
 fn tooltip(ed: &Editor, b: Button) -> String {
     let on = |v: bool| if v { "on" } else { "off" };
-    let name = |t: Tool| match t {
-        Tool::Select => "Select and move",
-        Tool::Rect => "Rectangle",
-        Tool::Ellipse => "Ellipse",
-        Tool::Arrow => "Arrow",
-        Tool::Line => "Line",
-        Tool::Pen => "Pen",
-        Tool::Marker => "Highlighter",
-        Tool::Text => "Text",
-        Tool::Pixelate => "Pixelate",
-        Tool::Counter => "Counter",
-    };
     match b {
-        Button::Tool(t) => format!("{}  {}", name(t), t.hotkey().to_ascii_uppercase()),
+        Button::Tool(t) => format!("{}  {}", t.name(), t.hotkey().to_ascii_uppercase()),
         Button::Color(i) => format!("Colour  {}   ·   right-click to change", i + 1),
-        Button::Undo => "Undo  Ctrl+Z".into(),
-        Button::Redo => "Redo  Ctrl+Shift+Z".into(),
-        Button::Save => "Save  Ctrl+S".into(),
-        Button::Copy => "Copy  Ctrl+C".into(),
+        Button::Undo => format!("Undo  {}", cmd!("Z")),
+        Button::Redo => format!("Redo  {}", cmd!("Shift+Z")),
+        Button::Save => format!("Save  {}", cmd!("S")),
+        Button::Copy => format!("Copy  {}", cmd!("C")),
         Button::Close => "Cancel  Esc".into(),
         Button::Record => "Record  Enter".into(),
         Button::SystemSound | Button::Mic if ed.gif => "No sound in a GIF".into(),
         Button::SystemSound => format!("Computer sound: {}  S", on(ed.sound.system)),
         Button::Mic => format!("Microphone: {}  M", on(ed.sound.mic)),
         Button::Gif => format!("Save as GIF: {}  G", on(ed.gif)),
-        Button::RecordMode => "Record video  Ctrl+R".into(),
-        Button::ShotMode => "Screenshot instead  Ctrl+R".into(),
+        Button::RecordMode => format!("Record video  {}", cmd!("R")),
+        Button::ShotMode => format!("Screenshot instead  {}", cmd!("R")),
     }
 }
 

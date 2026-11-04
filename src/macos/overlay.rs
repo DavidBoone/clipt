@@ -231,7 +231,7 @@ impl Session {
                         crate::editor::ui::render(&self.editor, scr_idx, &mut pm, (0, 0));
                     }
                 }
-                Some(rs) => paint_rects(&self.editor, scr_idx, &mut win.buf, w, rs),
+                Some(rs) => rs.iter().for_each(|&r| crate::editor::damage::repaint(&self.editor, scr_idx, &mut win.buf, w, h, r)),
             }
             win.full = false;
             for s in &mut win.surfaces {
@@ -312,31 +312,35 @@ impl Session {
         }
     }
 
-    /// A window picked for a screenshot is fetched on its own and painted
-    /// over the frozen screen, so what covered it neither shows nor is saved.
-    /// Not in record mode, which records the live screen anyway.
+    /// A covered window picked for a screenshot is fetched on its own and
+    /// painted over the frozen screen, so what covered it neither shows nor
+    /// is saved; selecting anything else puts the screen back. Not in record
+    /// mode, which records the live screen anyway.
     fn bring_forward(&mut self) {
-        if self.editor.record {
+        let picked = if self.editor.record { None } else { self.editor.selected_window().cloned() };
+        let id = picked.as_ref().map(|w| w.id.clone());
+        if self.raised == id {
             return;
         }
-        let Some(w) = self.editor.selected_window().cloned() else { return };
-        if self.raised.as_deref() == Some(w.id.as_str()) {
-            return;
-        }
-        self.raised = Some(w.id.clone());
-        let Some(rect) = tiny_skia::Rect::from_xywh(w.x, w.y, w.width, w.height) else { return };
-        let (cx, cy) = (w.x + w.width / 2.0, w.y + w.height / 2.0);
-        let screens = &self.editor.screens;
-        let scale = screens.iter().find(|s| s.bounds().contains(cx, cy)).or(screens.first()).map_or(1.0, |s| s.scale);
-        match super::window_shot::capture(&w, scale as f64) {
-            Ok(img) => {
-                self.editor.paste(rect, img, scale);
-                self.dirty = true;
-                for win in &mut self.wins {
-                    win.full = true;
+        self.raised = id;
+        // Lowered first: whether the new one is covered depends on the
+        // original stacking.
+        let mut changed = self.editor.lower_window();
+        if let Some(w) = picked.filter(|w| self.editor.window_covered(&w.id)) {
+            let scale = self.editor.scale_at((w.x + w.width / 2.0, w.y + w.height / 2.0));
+            match super::window_shot::capture(&w, scale as f64) {
+                Ok(img) => {
+                    self.editor.raise_window(&w.id, img);
+                    changed = true;
                 }
+                Err(e) => crate::record::debug(&format!("bringing the window forward: {e:#}")),
             }
-            Err(e) => crate::record::debug(&format!("bringing the window forward: {e:#}")),
+        }
+        if changed {
+            self.dirty = true;
+            for win in &mut self.wins {
+                win.full = true;
+            }
         }
     }
 
@@ -372,19 +376,6 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         self.hide();
-    }
-}
-
-/// Repaint the damaged rectangles of one screen's bitmap.
-fn paint_rects(ed: &Editor, idx: usize, buf: &mut [u8], w: u32, rs: &[IRect]) {
-    for r in rs {
-        let Some(mut tmp) = tiny_skia::Pixmap::new(r.w as u32, r.h as u32) else { continue };
-        crate::editor::ui::render(ed, idx, &mut tmp.as_mut(), (r.x, r.y));
-        let row = r.w as usize * 4;
-        for (y, src) in tmp.data().chunks_exact(row).enumerate() {
-            let off = ((r.y as usize + y) * w as usize + r.x as usize) * 4;
-            buf[off..off + row].copy_from_slice(src);
-        }
     }
 }
 

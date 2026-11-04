@@ -3,7 +3,7 @@
 #   tests/e2e.sh                       build everything, run every suite
 #   tests/e2e.sh [--no-build] IMAGE LAYOUT
 #     IMAGE: sway | gnome | x11 | compositors
-#     LAYOUT: single frac dual triple (sway), single dual (gnome), single multi (x11),
+#     LAYOUT: single sound frac dual triple (sway), single dual (gnome), single multi (x11),
 #             labwc niri (compositors)
 set -e
 cd "$(dirname "$0")/.."
@@ -16,7 +16,8 @@ if [ $build = 1 ]; then
   docker build -q -t clipt-x11 tests/x11 >/dev/null
   docker build -q -t clipt-compositors tests/compositors >/dev/null
 fi
-B=$PWD/target/release
+# CLIPT_PROFILE: the cargo profile the binaries come from (CI uses "ci").
+B=$PWD/target/${CLIPT_PROFILE:-release}
 run() {
   case $1 in
     sway) docker run --rm --shm-size=512m -v $B/clipt:/clipt:ro -v $B/examples/vinput:/vinput:ro -v $B/examples/testwin:/testwin:ro \
@@ -35,7 +36,7 @@ if [ $# -eq 2 ]; then
   exit
 fi
 rc=0
-for l in single frac dual triple; do run sway $l || rc=1; done
+for l in single sound frac dual triple; do run sway $l || rc=1; done
 for l in single dual; do run gnome $l || rc=1; done
 for l in single multi; do run x11 $l || rc=1; done
 for c in labwc niri; do run compositors $c || rc=1; done

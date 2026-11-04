@@ -1,52 +1,56 @@
-//! clipt — a lightweight screenshot tool for Wayland, X11 and macOS.
+//! clipt — a lightweight screenshot tool for Wayland, X11, macOS and Windows.
 
 // Some shared code (image rotation, video paths) only serves what macOS
-// can't do yet, recording among it.
-#![cfg_attr(target_os = "macos", allow(dead_code))]
+// and Windows can't do yet, recording among it.
+#![cfg_attr(not(wayland_x11), allow(dead_code))]
 
 mod capture;
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 mod clipboard;
 mod config;
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 mod dbus;
 mod editor;
 mod icon;
 mod image;
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(not(target_os = "macos"))]
 mod notify;
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 mod overlay;
+#[cfg(unix)]
 mod record;
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 mod session;
 mod text;
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 mod tray;
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 mod update;
+#[cfg(windows)]
+mod win32;
 mod windows;
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 mod x11;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 use anyhow::bail;
 use anyhow::{Context, Result};
 use capture::Shot;
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 use capture::{Backend, Capturer, Output};
 use config::Config;
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 use editor::{Editor, Outcome};
 use std::io::Write;
 use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
 use macos::HELP;
+#[cfg(windows)]
+use win32::HELP;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 const HELP: &str = "\
 clipt — screenshot tool for Wayland and X11
 
@@ -115,7 +119,7 @@ PulseAudio or pipewire-pulse server.
 
 #[derive(Default)]
 // macOS doesn't record yet, so it reads fewer of these.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(not(wayland_x11), allow(dead_code))]
 struct Args {
     cmd: String,
     screen: Option<String>,
@@ -129,6 +133,7 @@ struct Args {
     record_mode: Option<String>,
     fps: Option<u32>,
     stop: bool,
+    #[cfg(unix)]
     pause: Option<record::PauseCmd>,
     gif: bool,
     /// --audio[=SOURCES] or --no-audio ("none").
@@ -161,8 +166,11 @@ fn parse_args() -> Result<Args> {
             Long("no-audio") => a.audio = Some("none".into()),
             Long("separate-audio") => a.separate_audio = true,
             Long("stop") => a.stop = true,
+            #[cfg(unix)]
             Long("pause") => a.pause = Some(record::PauseCmd::Pause),
+            #[cfg(unix)]
             Long("resume") => a.pause = Some(record::PauseCmd::Resume),
+            #[cfg(unix)]
             Long("toggle-pause") => a.pause = Some(record::PauseCmd::Toggle),
             Short('h') | Long("help") => {
                 print!("{HELP}");
@@ -250,6 +258,19 @@ fn run() -> Result<()> {
     macos::run(args, Config::load()?)
 }
 
+#[cfg(windows)]
+fn run() -> Result<()> {
+    START.get_or_init(std::time::Instant::now);
+    let args = parse_args()?;
+    if args.cmd == "debug-icon" {
+        return debug_icon(&args);
+    }
+    if args.cmd == "config" {
+        return config_cmd(&args);
+    }
+    win32::run(args, Config::load()?)
+}
+
 /// `clipt debug-icon [-o PATH]`: a contact sheet of the icon's sizes, or,
 /// for a PATH ending in .iconset, the macOS app icon's PNGs, which
 /// packaging/macos turns into an .icns with `iconutil`.
@@ -262,7 +283,7 @@ fn debug_icon(args: &Args) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 fn run() -> Result<()> {
     let t0 = *START.get_or_init(std::time::Instant::now);
     let dbg = std::env::var_os("CLIPT_DEBUG").is_some();
@@ -464,7 +485,7 @@ fn run() -> Result<()> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 fn gui(cfg: &Config, args: &Args, mut ed: Editor, kind: capture::DisplayKind, backend: Option<Backend>, lap: &dyn Fn(&str)) -> Result<()> {
     // It can switch to recording the selection (Ctrl+R, or its buttons),
     // with the sound the settings would record.
@@ -532,7 +553,7 @@ fn gui(cfg: &Config, args: &Args, mut ed: Editor, kind: capture::DisplayKind, ba
 
 /// `clipt list sound`: what `--audio` can record, marking what `system` and
 /// `mic` stand for.
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 fn list_sound() -> Result<()> {
     for d in record::audio::devices()? {
         let mark = match (d.is_system, d.is_mic) {
@@ -548,7 +569,7 @@ fn list_sound() -> Result<()> {
 /// The overlay in record mode: what to record (an area, or a window picked
 /// with a click), and the sound toggles (starting from `sound`) and GIF
 /// toggle as the user left them, or None if cancelled.
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 fn pick_recording_area(
     cfg: &Config,
     args: &Args,
@@ -589,6 +610,7 @@ fn pick_recording_area(
 }
 
 /// Whether a recording starts out as a GIF: `--gif`, or `record_format`.
+#[cfg(unix)]
 fn wants_gif(cfg: &Config, args: &Args) -> bool {
     args.gif || cfg.record_format == "gif"
 }
@@ -596,6 +618,7 @@ fn wants_gif(cfg: &Config, args: &Args) -> bool {
 /// The overlay's GIF toggle is remembered: when it was flipped, it becomes
 /// `record_format`, so the tray, `clipt record` and the next Print Screen
 /// follow it.
+#[cfg(unix)]
 fn remember_gif(cfg: &Config, args: &Args, ed: &editor::Editor) {
     if ed.gif != wants_gif(cfg, args)
         && let Err(e) = Config::set("record_format", if ed.gif { "gif" } else { "mp4" })
@@ -605,8 +628,8 @@ fn remember_gif(cfg: &Config, args: &Args, ed: &editor::Editor) {
 }
 
 /// What a record-mode overlay picked: the window clicked, or the area.
-#[cfg(not(target_os = "macos"))]
-fn recording_target(ed: &Editor) -> Result<record::Target> {
+#[cfg(unix)]
+fn recording_target(ed: &editor::Editor) -> Result<record::Target> {
     let r = ed.final_rect().context("nothing selected")?;
     Ok(match ed.selected_window() {
         Some(w) => record::Target::Window(w.clone()),
@@ -616,7 +639,7 @@ fn recording_target(ed: &Editor) -> Result<record::Target> {
 
 /// Record what the screenshot overlay was switched to record, with the sound
 /// as toggled there, and otherwise as `clipt record` would.
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 fn record_picked(
     cfg: &Config,
     args: &Args,
@@ -647,7 +670,7 @@ fn record_picked(
     record::run(cfg, opts)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 fn deliver(cfg: &Config, args: &Args, img: image::Image, kind: capture::DisplayKind) -> Result<()> {
     let png = img.encode_png()?;
     let (iw, ih) = (img.width, img.height);
@@ -749,7 +772,7 @@ fn crop_geometry(img: &image::Image, shots: &[Shot], g: &str) -> Result<image::I
 /// Return freed heap pages to the OS before lingering in the background.
 /// glibc keeps them otherwise; musl and the BSD allocators release large
 /// frees on their own.
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 pub fn trim_heap() {
     #[cfg(target_env = "gnu")]
     unsafe {
@@ -759,7 +782,7 @@ pub fn trim_heap() {
 
 /// Fork into the background: the parent exits immediately, the child carries
 /// on (with the Wayland connection it inherited) to serve the clipboard.
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 fn daemonize() {
     unsafe {
         match libc::fork() {

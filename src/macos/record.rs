@@ -15,20 +15,20 @@ use anyhow::{Context, Result, anyhow, bail};
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2::{AllocAnyThread, DefinedClass, MainThreadMarker, define_class, msg_send};
+use objc2::runtime::{AnyClass, ProtocolObject};
+use objc2::{AllocAnyThread, DefinedClass, MainThreadMarker, define_class, msg_send, sel};
 use objc2_app_kit::NSApplication;
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_core_graphics::CGDisplayBounds;
+use objc2_core_foundation::{CFDictionary, CGPoint, CGRect, CGSize};
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::{
     CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane,
     CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
     kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
 };
-use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
+use objc2_foundation::{NSArray, NSError, NSNumber, NSObject, NSObjectProtocol, NSString};
 use objc2_screen_capture_kit::{
-    SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate, SCStreamOutput, SCStreamOutputType,
+    SCContentFilter, SCFrameStatus, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate, SCStreamFrameInfoStatus,
+    SCStreamOutput, SCStreamOutputType,
 };
 use std::sync::Mutex;
 use std::sync::mpsc;
@@ -82,7 +82,9 @@ define_class!(
             if kind != SCStreamOutputType::Screen {
                 return;
             }
-            // Idle frames (nothing changed) carry no picture.
+            if !complete(buffer) {
+                return;
+            }
             let Some(frame) = copy_frame(buffer) else { return };
             let mut sink = self.ivars().sink.lock().unwrap();
             let Some(s) = sink.as_mut() else { return };
@@ -106,6 +108,21 @@ impl Output {
         let this = Self::alloc().set_ivars(Ivars { sink: Mutex::new(Some(sink)), events: Mutex::new(events) });
         unsafe { msg_send![super(this), init] }
     }
+}
+
+/// Whether a sample buffer holds a new picture: `complete`, or the stream's
+/// first frame (`started`), which may be the only one while the screen
+/// stays still. Idle frames (nothing changed) and blank or suspended ones
+/// (display asleep, screen locked) are left out.
+fn complete(buffer: &CMSampleBuffer) -> bool {
+    let Some(list) = (unsafe { buffer.sample_attachments_array(false) }) else { return false };
+    if list.count() < 1 {
+        return false;
+    }
+    let Some(info) = (unsafe { (list.value_at_index(0) as *const CFDictionary).as_ref() }) else { return false };
+    let key: *const NSString = unsafe { SCStreamFrameInfoStatus };
+    let status = unsafe { info.value(key.cast()) } as *const NSNumber;
+    unsafe { status.as_ref() }.is_some_and(|n| matches!(SCFrameStatus(n.integerValue()), SCFrameStatus::Complete | SCFrameStatus::Started))
 }
 
 /// The picture in a sample buffer: NV12, its two planes packed.
@@ -140,8 +157,9 @@ pub(super) fn error_text(e: *mut NSError) -> Option<String> {
     unsafe { e.as_ref() }.map(|e| e.localizedDescription().to_string())
 }
 
-/// What's on screen now: displays and windows.
-pub(super) fn shareable_content() -> Result<Retained<SCShareableContent>> {
+/// What's on screen now: displays and windows, if ScreenCaptureKit says
+/// within `limit`.
+pub(super) fn shareable_content(limit: Duration) -> Result<Retained<SCShareableContent>> {
     let (tx, rx) = mpsc::channel();
     let handler = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
         let r = match unsafe { Retained::retain(content) } {
@@ -151,10 +169,10 @@ pub(super) fn shareable_content() -> Result<Retained<SCShareableContent>> {
         let _ = tx.send(r);
     });
     unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&handler) };
-    match rx.recv_timeout(REPLY_LIMIT) {
+    match rx.recv_timeout(limit) {
         Ok(Ok(c)) => Ok(c.into_inner()),
         Ok(Err(e)) => bail!("ScreenCaptureKit can't list the screen's contents: {e}"),
-        Err(_) => bail!("ScreenCaptureKit didn't list the screen's contents within {} s", REPLY_LIMIT.as_secs()),
+        Err(_) => bail!("ScreenCaptureKit didn't list the screen's contents within {} s", limit.as_secs_f32()),
     }
 }
 
@@ -163,12 +181,14 @@ pub(super) fn shareable_content() -> Result<Retained<SCShareableContent>> {
 /// `system_sound`: the computer's sound comes with it (see `sound.rs`).
 pub(crate) fn capture(target: &Target, cursor: bool, interval: Duration, system_sound: bool) -> Result<Capture> {
     let mtm = MainThreadMarker::new().context("not on the main thread")?;
+    // Weakly linked (build.rs): before 12.3 its classes don't exist.
+    anyhow::ensure!(AnyClass::get(c"SCStream").is_some(), "recording needs macOS 12.3 or later");
     // ScreenCaptureKit needs the window server connection AppKit makes.
     let _ = NSApplication::sharedApplication(mtm);
     super::capture::ensure_permission()?;
     let outputs = super::capture::outputs(mtm)?;
     anyhow::ensure!(!outputs.is_empty(), "no displays found");
-    let content = shareable_content()?;
+    let content = shareable_content(REPLY_LIMIT)?;
 
     let config = unsafe { SCStreamConfiguration::new() };
     let (filter, size) = match target {
@@ -176,24 +196,23 @@ pub(crate) fn capture(target: &Target, cursor: bool, interval: Duration, system_
             let id: u32 = w.id.parse().with_context(|| format!("window id '{}'", w.id))?;
             let windows = unsafe { content.windows() };
             let win = windows.iter().find(|s| unsafe { s.windowID() } == id).context("that window has closed")?;
-            // Its size in pixels on the display it's on.
-            let (out, _) = crate::record::resolve_target(&outputs, target)?;
             let frame = unsafe { win.frame() };
-            let scale = scale(&out);
             crate::record::debug(&format!("recording window {id} ({} — {}) on its own", w.app, w.title));
             let filter = unsafe { SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &win) };
-            unsafe { config.setIgnoreShadowsSingleWindow(true) };
+            let scale = window_scale(&filter, &outputs, frame);
+            // macOS 14+; before that the shadow comes along.
+            if config.respondsToSelector(sel!(setIgnoreShadowsSingleWindow:)) {
+                unsafe { config.setIgnoreShadowsSingleWindow(true) };
+            }
             (filter, (frame.size.width * scale, frame.size.height * scale))
         }
         t => {
             let (out, crop) = crate::record::resolve_target(&outputs, t)?;
+            let id = super::capture::display_ids()?.get(out.index).copied();
             let displays = unsafe { content.displays() };
             let display = displays
                 .iter()
-                .find(|d| {
-                    let b = CGDisplayBounds(unsafe { d.displayID() });
-                    (b.origin.x.round() as i32, b.origin.y.round() as i32) == (out.x, out.y)
-                })
+                .find(|d| Some(unsafe { d.displayID() }) == id)
                 .with_context(|| format!("ScreenCaptureKit doesn't list display {}", out.name))?;
             let (x, y, w, h) = crop.unwrap_or((0.0, 0.0, out.width as f64, out.height as f64));
             crate::record::debug(&format!("recording {w}x{h} at {x},{y} of display {}", out.name));
@@ -228,6 +247,21 @@ pub(crate) fn capture(target: &Target, cursor: bool, interval: Duration, system_
         run_stream(&filter, &config, sink, system_sound)
     });
     Ok(Capture { zoom: false, start: Box::new(|| {}), stream })
+}
+
+/// Pixels per point for a window recorded on its own, wherever it is: the
+/// filter knows (macOS 14+); before that, the sharpest display the window
+/// is on, or of all displays when it's on none.
+fn window_scale(filter: &SCContentFilter, outputs: &[crate::capture::Output], f: CGRect) -> f64 {
+    if filter.respondsToSelector(sel!(pointPixelScale)) {
+        return unsafe { filter.pointPixelScale() } as f64;
+    }
+    let on = |o: &&crate::capture::Output| {
+        let (x, y, w, h) = (o.x as f64, o.y as f64, o.width as f64, o.height as f64);
+        x < f.origin.x + f.size.width && f.origin.x < x + w && y < f.origin.y + f.size.height && f.origin.y < y + h
+    };
+    let sharpest = |o: &mut dyn Iterator<Item = &crate::capture::Output>| o.map(scale).reduce(f64::max);
+    sharpest(&mut outputs.iter().filter(on)).or_else(|| sharpest(&mut outputs.iter())).unwrap_or(1.0)
 }
 
 /// Pixels per point on `out` (2 on Retina displays).

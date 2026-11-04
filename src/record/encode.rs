@@ -161,7 +161,7 @@ fn ffmpeg() -> Command {
 
 #[cfg(target_os = "macos")]
 const INSTALL_FFMPEG: &str = "recording needs ffmpeg, which isn't installed (brew install ffmpeg)";
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 const INSTALL_FFMPEG: &str = "recording needs ffmpeg, which isn't installed (install the 'ffmpeg' package)";
 
 /// The first codec that encodes a test frame, or an error naming what's missing.
@@ -1104,7 +1104,11 @@ mod tests {
     fn codec_preferences() {
         assert_eq!(candidates("x264").unwrap(), vec![Codec::X264]);
         assert_eq!(candidates("nvenc").unwrap(), vec![Codec::Nvenc]);
-        assert!(candidates("auto").unwrap().ends_with(&[Codec::Nvenc, Codec::X264]));
+        if cfg!(target_os = "macos") {
+            assert_eq!(candidates("auto").unwrap(), vec![Codec::VideoToolbox, Codec::X264]);
+        } else {
+            assert!(candidates("auto").unwrap().ends_with(&[Codec::Nvenc, Codec::X264]));
+        }
         assert!(candidates("av1").is_err());
     }
 }

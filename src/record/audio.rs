@@ -3,11 +3,11 @@
 //! (`audio/pulse.rs`), ScreenCaptureKit and an Audio Queue on macOS
 //! (`macos/sound.rs`). Each offers `check`, `open` and `Capture::run`.
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 mod pulse;
 #[cfg(target_os = "macos")]
 pub use crate::macos::sound::{check, open};
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 pub use pulse::{check, devices, open};
 
 use anyhow::{Result, bail};

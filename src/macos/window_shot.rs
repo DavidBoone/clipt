@@ -7,7 +7,7 @@
 //! that, `CGWindowListCreateImage`, which macOS 14 deprecated, looked up at
 //! run time as `capture.rs` looks up `CGDisplayCreateImage`.
 
-use super::record::{REPLY_LIMIT, Sendable, error_text, shareable_content};
+use super::record::{Sendable, error_text, shareable_content};
 use crate::image::Image;
 use crate::windows::Window;
 use anyhow::{Context, Result, bail};
@@ -20,6 +20,11 @@ use objc2_foundation::NSError;
 use objc2_screen_capture_kit::{SCContentFilter, SCScreenshotManager, SCStreamConfiguration};
 use std::ptr::NonNull;
 use std::sync::mpsc;
+use std::time::Duration;
+
+/// How long each ScreenCaptureKit step may take. It answers in
+/// milliseconds; the overlay waits on it, frozen, so a hang gives up soon.
+const SHOT_LIMIT: Duration = Duration::from_secs(2);
 
 /// `w` alone, at `scale` pixels per point, with transparent rounded corners
 /// (premultiplied RGBA).
@@ -31,7 +36,7 @@ pub fn capture(w: &Window, scale: f64) -> Result<Image> {
 
 /// macOS 14 and later.
 fn screenshot_manager(id: u32, w: &Window, scale: f64) -> Result<CFRetained<CGImage>> {
-    let content = shareable_content()?;
+    let content = shareable_content(SHOT_LIMIT)?;
     let windows = unsafe { content.windows() };
     let win = windows.iter().find(|s| unsafe { s.windowID() } == id).context("that window has closed")?;
     let filter = unsafe { SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &win) };
@@ -52,10 +57,10 @@ fn screenshot_manager(id: u32, w: &Window, scale: f64) -> Result<CFRetained<CGIm
         let _ = tx.send(r);
     });
     unsafe { SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(&filter, &config, Some(&handler)) };
-    match rx.recv_timeout(REPLY_LIMIT) {
+    match rx.recv_timeout(SHOT_LIMIT) {
         Ok(Ok(img)) => Ok(img.into_inner()),
         Ok(Err(e)) => bail!("ScreenCaptureKit couldn't capture the window: {e}"),
-        Err(_) => bail!("ScreenCaptureKit didn't capture the window within {} s", REPLY_LIMIT.as_secs()),
+        Err(_) => bail!("ScreenCaptureKit didn't capture the window within {} s", SHOT_LIMIT.as_secs()),
     }
 }
 

@@ -72,6 +72,29 @@ pub fn screen_rects(scr: &crate::editor::Screen, rs: &[tiny_skia::Rect]) -> Vec<
         .collect()
 }
 
+/// Repaint `r` of screen `idx`'s `w`×`h` bitmap `buf`. It is rendered with
+/// a margin and only `r` copied back: tiny-skia antialiases a line that a
+/// pixmap's edge cuts through differently from one it doesn't, so a damaged
+/// rectangle whose edge crossed a line (the loupe's frame, an outline) left
+/// a faint seam there.
+pub fn repaint(ed: &super::Editor, idx: usize, buf: &mut [u8], w: u32, h: u32, r: IRect) {
+    const MARGIN: i32 = 2;
+    let (x0, y0) = ((r.x - MARGIN).max(0), (r.y - MARGIN).max(0));
+    let (x1, y1) = ((r.right() + MARGIN).min(w as i32), (r.bottom() + MARGIN).min(h as i32));
+    let (rx1, ry1) = (r.right().min(w as i32), r.bottom().min(h as i32));
+    if rx1 <= r.x || ry1 <= r.y {
+        return;
+    }
+    let Some(mut tmp) = tiny_skia::Pixmap::new((x1 - x0) as u32, (y1 - y0) as u32) else { return };
+    super::ui::render(ed, idx, &mut tmp.as_mut(), (x0, y0));
+    let (tw, n) = ((x1 - x0) as usize, (rx1 - r.x) as usize * 4);
+    for y in r.y..ry1 {
+        let src = ((y - y0) as usize * tw + (r.x - x0) as usize) * 4;
+        let dst = (y as usize * w as usize + r.x as usize) * 4;
+        buf[dst..dst + n].copy_from_slice(&tmp.data()[src..src + n]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{IRect, merge};

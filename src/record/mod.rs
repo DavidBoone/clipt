@@ -7,8 +7,9 @@
 //! are queued rather than dropped (a gap would be heard).
 //!
 //! One recording runs at a time, holding a lock on
-//! `$XDG_RUNTIME_DIR/clipt-record.pid`; `clipt record --stop` (and Ctrl-C,
-//! SIGTERM) end it cleanly, letting ffmpeg finish the file.
+//! `clipt-record.pid` in `$XDG_RUNTIME_DIR` (on macOS the user's temporary
+//! directory); `clipt record --stop` (and Ctrl-C, SIGTERM) end it cleanly,
+//! letting ffmpeg finish the file.
 //!
 //! See docs/recording-plan.md and docs/audio-plan.md.
 
@@ -16,17 +17,17 @@ pub mod audio;
 mod camera;
 mod clarity;
 mod encode;
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 mod follow;
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 mod indicator;
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 mod linux;
 mod mkv;
 
 pub use encode::Balance;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(wayland_x11)]
 use crate::capture::Backend;
 use crate::capture::{LogicalRect, Output, VideoFrame};
 use crate::config::Config;
@@ -55,7 +56,7 @@ pub struct Options {
     pub output: Option<String>,
     pub fps: Option<u32>,
     pub cursor: bool,
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(wayland_x11)]
     pub backend: Option<Backend>,
     /// GIF or not, over `record_format`: from `--gif` or the overlay's
     /// toggle. A `.gif` output name also makes a GIF.
@@ -83,7 +84,7 @@ pub(crate) struct Capture {
 }
 
 /// Whether the recording is stopping, for capture code that polls.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(wayland_x11, allow(dead_code))]
 pub(crate) fn stopping() -> bool {
     STOP.load(Ordering::SeqCst)
 }
@@ -147,8 +148,27 @@ fn apply(cmd: u8) {
 //   clipt-record.ctl  a FIFO the recorder reads one-byte commands from
 
 fn runtime_file(name: &str) -> PathBuf {
-    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    dir.join(name)
+    #[cfg(target_os = "macos")]
+    let dir = darwin_user_temp_dir();
+    #[cfg(not(target_os = "macos"))]
+    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    dir.unwrap_or_else(std::env::temp_dir).join(name)
+}
+
+/// The user's own temporary directory (`/var/folders/…/T/`), from the
+/// system rather than `$TMPDIR`, which sudo and some launchd contexts don't
+/// set: they'd fall back to the shared `/tmp`, and the tray and a terminal
+/// would look for the recording in different places.
+#[cfg(target_os = "macos")]
+fn darwin_user_temp_dir() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    let n = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr().cast(), buf.len()) };
+    // n counts the terminating NUL; 0 is failure, more than the buffer too long.
+    (n > 1 && n <= buf.len()).then(|| {
+        buf.truncate(n - 1);
+        PathBuf::from(std::ffi::OsString::from_vec(buf))
+    })
 }
 
 fn pidfile() -> PathBuf {
@@ -195,8 +215,15 @@ impl Lock {
             .truncate(false)
             .open(&p)
             .with_context(|| format!("opening {}", p.display()))?;
-        if flock(&file, FlockOperation::NonBlockingLockExclusive).is_err() {
-            bail!("already recording; stop it with 'clipt record --stop'");
+        // `status()`, which a tray polls, holds a shared lock for a moment:
+        // a recording starting just then mustn't be told one is running.
+        let mut tries = 0;
+        while flock(&file, FlockOperation::NonBlockingLockExclusive).is_err() {
+            tries += 1;
+            if tries == 10 {
+                bail!("already recording; stop it with 'clipt record --stop'");
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
         let lock = Self { file };
         lock.set(false)?;
@@ -310,7 +337,7 @@ pub fn run(cfg: &Config, opts: Options) -> Result<()> {
     let codec = encode::choose(&cfg.record_codec)?;
 
     let interval = Duration::from_secs_f64(1.0 / fps as f64);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(wayland_x11)]
     let capture = linux::capture(&opts.target, opts.backend, opts.cursor, interval)?;
     #[cfg(target_os = "macos")]
     let capture =
@@ -441,10 +468,7 @@ pub fn run(cfg: &Config, opts: Options) -> Result<()> {
             println!("{}", target.display());
             if cfg.notify {
                 let body = format!("{}  ·  {}", target.display(), stats);
-                #[cfg(not(target_os = "macos"))]
                 crate::notify::send("Recording saved", &body, None);
-                #[cfg(target_os = "macos")]
-                crate::macos::notify("Recording saved", &body);
             }
         }
         Err(_) if path.exists() => eprintln!("clipt: the partial recording is in {}", path.display()),

@@ -3,6 +3,7 @@
 //! asks it to paint each output.
 
 pub mod damage;
+pub mod keys;
 pub mod shapes;
 pub mod ui;
 
@@ -125,8 +126,9 @@ pub struct Mods {
 
 pub struct Screen {
     pub output: Output,
-    /// The capture in surface byte order. The only full-size copy we keep:
-    /// the dimmed look is applied while copying it into the frame.
+    /// The capture in surface byte order. The dimmed look is applied while
+    /// copying it into the frame; the only other full-size copy is the one
+    /// `Editor::raise_window` keeps to undo with.
     pub bg: Pixmap,
     pub scale: f32,
 }
@@ -229,6 +231,12 @@ pub struct Editor {
     pub text: Option<TextEdit>,
     /// Visible windows, topmost first (see `crate::windows`).
     pub windows: Vec<crate::windows::Window>,
+    /// The window a click selected (its id) and the selection that made,
+    /// for `selected_window`: a window filling its screen has the same rect
+    /// as the screen, which Tab, Ctrl+A or drawing can select too.
+    clicked_window: Option<(String, Rect)>,
+    /// Each screen's `bg`, and `windows`, as they were before `raise_window`.
+    unraised: Option<(Vec<Pixmap>, Vec<crate::windows::Window>)>,
     /// Tab flips hover from the window under the pointer to its monitor.
     pub hover_screen: bool,
     /// The highlight eases between targets: where it started, where it's
@@ -250,6 +258,10 @@ pub struct Editor {
     last_click: Option<(std::time::Instant, Pt)>,
     /// Show the size/width hint pill until the next pointer move.
     pub width_hint: bool,
+    /// The `?` sheet of shortcuts, open on this screen.
+    pub help: Option<usize>,
+    /// The last `?`, to tell a held key's repeats from a second press.
+    help_key_at: Option<std::time::Instant>,
     /// Bumped whenever committed shapes change; forces a full redraw.
     revision: u64,
     drawn_revision: Option<u64>,
@@ -275,6 +287,8 @@ impl Editor {
             swap_rb,
             fonts,
             sel: None,
+            clicked_window: None,
+            unraised: None,
             shapes: Vec::new(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -302,6 +316,8 @@ impl Editor {
             can_switch: false,
             last_click: None,
             width_hint: false,
+            help: None,
+            help_key_at: None,
             revision: 0,
             drawn_revision: None,
             drawn_sel: None,
@@ -385,16 +401,21 @@ impl Editor {
     /// switched to whole screens), or else its screen.
     fn target_at(&self, p: Pt) -> Option<Hover> {
         let scr = self.screens.iter().find(|s| s.bounds().contains(p.0, p.1))?;
-        if !self.hover_screen {
-            let desk = self.desktop();
-            let hit = self.windows.iter().find(|w| Rect::from_xywh(w.x, w.y, w.width, w.height).is_some_and(|r| r.contains(p.0, p.1)));
-            if let Some(w) = hit
-                && let Some(r) = Rect::from_xywh(w.x, w.y, w.width, w.height).and_then(|r| r.intersect(&desk))
-            {
-                return Some(Hover { rect: r, name: w.name().to_string(), is_window: true });
-            }
+        if let Some((w, r)) = self.window_at(p) {
+            return Some(Hover { rect: r, name: w.name().to_string(), is_window: true });
         }
         Some(Hover { rect: scr.bounds(), name: scr.output.name.clone(), is_window: false })
+    }
+
+    /// The topmost window at `p` and its rect on the desktop, unless Tab
+    /// switched to whole screens.
+    fn window_at(&self, p: Pt) -> Option<(&crate::windows::Window, Rect)> {
+        if self.hover_screen {
+            return None;
+        }
+        let w = self.windows.iter().find(|w| Rect::from_xywh(w.x, w.y, w.width, w.height).is_some_and(|r| r.contains(p.0, p.1)))?;
+        let r = Rect::from_xywh(w.x, w.y, w.width, w.height)?.intersect(&self.desktop())?;
+        Some((w, r))
     }
 
     /// The area drawn undimmed: the selection, or else the hover highlight.
@@ -589,6 +610,7 @@ impl Editor {
                 if (p.0 - s.0).abs() > CLICK_SLOP || (p.1 - s.1).abs() > CLICK_SLOP {
                     self.drag = Drag::Creating { start: s };
                     self.sel = norm_rect(s, p);
+                    self.clicked_window = None;
                 }
             }
             Drag::Creating { start } => {
@@ -675,6 +697,10 @@ impl Editor {
 
     pub fn button_press(&mut self, p: Pt, left: bool, mods: Mods) -> bool {
         self.pointer = p;
+        // A click closes the shortcut sheet, and does nothing else.
+        if self.help.take().is_some() {
+            return true;
+        }
         if self.picker.is_some() {
             if let Some(part) = ui::picker_hit(self, p).filter(|_| left) {
                 self.pick(part, p);
@@ -694,15 +720,17 @@ impl Editor {
                 return true;
             }
             // Right click backs out: in-progress drag, then text, then the
-            // picked shape, then the selection.
+            // picked shape, then the selection (in record mode, whose
+            // shapes aren't shown, even when there are some).
             if !matches!(self.drag, Drag::None) {
                 self.cancel_drag();
             } else if self.text.is_some() {
                 self.cancel_text();
             } else if self.selected.take().is_some() {
                 self.revision += 1;
-            } else if self.shapes.is_empty() {
+            } else if self.shapes.is_empty() || self.record {
                 self.sel = None;
+                self.clicked_window = None;
                 self.tool = Tool::Select;
             }
             return true;
@@ -778,6 +806,7 @@ impl Editor {
                     // Drawing before selecting implies "this whole screen".
                     if let Some(i) = self.screen_at(p) {
                         self.sel = Some(self.screens[i].bounds());
+                        self.clicked_window = None;
                     }
                 }
                 let color = self.current_color();
@@ -817,12 +846,17 @@ impl Editor {
             Drag::Pending { .. } => {
                 // A click without a drag picks what's highlighted: the window
                 // under the pointer, or its whole screen. Also with something
-                // already selected, when nothing is highlighted.
+                // already selected, when nothing is highlighted. While text
+                // is being edited, a click away finishes it instead.
                 self.pointer = p;
-                if let Some(h) = self.target_at(p) {
-                    self.sel = Some(h.rect);
+                if self.text.is_some() {
+                    self.commit_text();
+                } else if let Some((w, r)) = self.window_at(p) {
+                    self.clicked_window = Some((w.id.clone(), r));
+                    self.sel = Some(r);
                 } else if let Some(i) = self.screen_at(p) {
                     self.sel = Some(self.screens[i].bounds());
+                    self.clicked_window = None;
                 }
             }
             Drag::Creating { .. } => {
@@ -853,6 +887,9 @@ impl Editor {
     }
 
     pub fn scroll(&mut self, dy: f32) -> bool {
+        if self.help.take().is_some() {
+            return true;
+        }
         if self.record {
             return false;
         }
@@ -865,6 +902,15 @@ impl Editor {
     }
 
     pub fn key(&mut self, key: Key, mods: Mods) -> bool {
+        if key == Key::Char('?') && !mods.ctrl && self.picker.is_none() && self.text.is_none() {
+            self.help_key();
+            return true;
+        }
+        // Any other key closes the shortcut sheet; Esc there mustn't also
+        // cancel.
+        if self.help.take().is_some() {
+            return true;
+        }
         if self.picker.is_some() {
             match key {
                 Key::Escape => self.close_picker(false),
@@ -904,6 +950,7 @@ impl Editor {
                 Key::Char('a') | Key::Char('A') => {
                     let i = self.screen_at(self.pointer).unwrap_or(0);
                     self.sel = self.screens.get(i).map(|s| s.bounds());
+                    self.clicked_window = None;
                 }
                 _ => return false,
             }
@@ -956,6 +1003,21 @@ impl Editor {
             Key::Delete | Key::Tab => return false,
         }
         true
+    }
+
+    /// `?` opens the sheet of shortcuts, or closes it. Hosts repeat a held
+    /// key, which would flicker it open and shut: a `?` soon after another
+    /// is taken as a repeat. Not mid-drag, where it would hide the drag.
+    fn help_key(&mut self) {
+        let now = std::time::Instant::now();
+        let repeat = self.help_key_at.is_some_and(|t| now.duration_since(t).as_millis() < 700);
+        self.help_key_at = Some(now);
+        if repeat {
+            return;
+        }
+        if self.help.take().is_none() && matches!(self.drag, Drag::None) {
+            self.help = Some(self.screen_at(self.pointer).unwrap_or(0));
+        }
     }
 
     /// Between screenshot and record mode. Annotations stay, but aren't shown
@@ -1185,11 +1247,13 @@ impl Editor {
     }
 
     /// The window the selection is, if it was picked by clicking a window
-    /// (exactly its highlight) rather than dragged or adjusted.
+    /// and not dragged, adjusted or selected again since.
     pub fn selected_window(&self) -> Option<&crate::windows::Window> {
-        let sel = self.sel?;
-        let desk = self.desktop();
-        self.windows.iter().find(|w| Rect::from_xywh(w.x, w.y, w.width, w.height).and_then(|r| r.intersect(&desk)) == Some(sel))
+        let (id, r) = self.clicked_window.as_ref()?;
+        if self.sel != Some(*r) {
+            return None;
+        }
+        self.windows.iter().find(|w| w.id == *id)
     }
 
     /// Selection to export; falls back to the screen under the pointer.
@@ -1201,8 +1265,7 @@ impl Editor {
     pub fn export(&mut self) -> Option<Image> {
         self.commit_text();
         let rect = self.final_rect()?;
-        let center = (rect.left() + rect.width() / 2.0, rect.top() + rect.height() / 2.0);
-        let scale = self.screen_at(center).map_or(1.0, |i| self.screens[i].scale);
+        let scale = self.scale_at((rect.left() + rect.width() / 2.0, rect.top() + rect.height() / 2.0));
         let w = (rect.width() * scale).round().max(1.0) as u32;
         let h = (rect.height() * scale).round().max(1.0) as u32;
         let mut pm = Pixmap::new(w, h)?;
@@ -1227,9 +1290,7 @@ impl Editor {
         shapes::draw_all(&mut pm.as_mut(), &view, (w as i32, h as i32), &shapes, &self.fonts, &fill);
         let mut data = pm.take();
         if self.swap_rb {
-            for p in data.as_chunks_mut::<4>().0 {
-                p.swap(0, 2);
-            }
+            swap_rb(&mut data);
         }
         // Captures are opaque, so premultiplied == straight here.
         Some(Image { width: w, height: h, data })
@@ -1258,19 +1319,27 @@ fn snap45(a: Pt, b: Pt) -> Pt {
 }
 
 impl Editor {
-    /// Paint `img` (premultiplied RGBA, `scale` pixels per point) over the
-    /// frozen screens at `rect`, in desktop coordinates: a window captured
-    /// on its own, so the parts other windows covered show and are saved.
-    /// The caller redraws everything. macOS only so far.
+    /// Show window `id` brought to the front: `img` is it captured on its
+    /// own (premultiplied RGBA, at whatever scale the system gave), painted
+    /// over the frozen screens, so the parts other windows covered show and
+    /// are saved. One window at a time: raising another, or `lower_window`,
+    /// puts the screens back as they were. The caller redraws everything.
+    /// macOS only so far.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub fn paste(&mut self, rect: Rect, img: Image, scale: f32) {
+    pub fn raise_window(&mut self, id: &str, img: Image) {
+        self.lower_window();
+        let Some(i) = self.windows.iter().position(|w| w.id == id) else { return };
+        let w = &self.windows[i];
+        let Some(rect) = Rect::from_xywh(w.x, w.y, w.width, w.height) else { return };
+        // From the image: a window on (or across) a display of another
+        // scale than the one asked for comes back at its own.
+        let scale = img.width as f32 / rect.width();
         let mut data = img.data;
         if self.swap_rb {
-            for p in data.as_chunks_mut::<4>().0 {
-                p.swap(0, 2);
-            }
+            swap_rb(&mut data);
         }
         let Some(pm) = tiny_skia::IntSize::from_wh(img.width, img.height).and_then(|size| Pixmap::from_vec(data, size)) else { return };
+        self.unraised = Some((self.screens.iter().map(|s| s.bg.clone()).collect(), self.windows.clone()));
         for s in &mut self.screens {
             if s.bounds().intersect(&rect).is_none() {
                 continue;
@@ -1282,16 +1351,53 @@ impl Editor {
             let ty = ((rect.top() - s.output.y as f32) * s.scale).round();
             s.bg.draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_row(k, 0.0, 0.0, k, tx, ty), None);
         }
+        // Frontmost now, so clicks pick what's shown.
+        let w = self.windows.remove(i);
+        self.windows.insert(0, w);
         self.revision += 1;
+    }
+
+    /// Undo `raise_window`; false if no window was raised.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn lower_window(&mut self) -> bool {
+        let Some((bgs, windows)) = self.unraised.take() else { return false };
+        for (s, bg) in self.screens.iter_mut().zip(bgs) {
+            s.bg = bg;
+        }
+        self.windows = windows;
+        self.revision += 1;
+        true
+    }
+
+    /// Whether a window above `id` overlaps it, so raising it would show
+    /// something new.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn window_covered(&self, id: &str) -> bool {
+        let rect = |w: &crate::windows::Window| Rect::from_xywh(w.x, w.y, w.width, w.height);
+        let Some(i) = self.windows.iter().position(|w| w.id == id) else { return false };
+        let Some(r) = rect(&self.windows[i]) else { return false };
+        self.windows[..i].iter().any(|w| rect(w).and_then(|a| a.intersect(&r)).is_some())
+    }
+
+    /// Pixels per point of the screen at `p`, or the first screen's.
+    pub fn scale_at(&self, p: Pt) -> f32 {
+        self.screen_at(p).map_or(1.0, |i| self.screens[i].scale)
+    }
+}
+
+/// Swap the first and third byte of each pixel: RGBA and BGRA.
+fn swap_rb(data: &mut [u8]) {
+    for p in data.as_chunks_mut::<4>().0 {
+        p.swap(0, 2);
     }
 }
 
 fn to_pixmap(img: Image, swap_rb: bool) -> Pixmap {
     let mut data = img.data;
+    if swap_rb {
+        self::swap_rb(&mut data);
+    }
     for p in data.as_chunks_mut::<4>().0 {
-        if swap_rb {
-            p.swap(0, 2);
-        }
         p[3] = 255;
     }
     Pixmap::from_vec(data, tiny_skia::IntSize::from_wh(img.width, img.height).unwrap()).unwrap()
@@ -1327,23 +1433,40 @@ mod tests {
     }
 
     #[test]
-    fn a_pasted_window_covers_the_frozen_screen_and_is_saved() {
+    fn a_raised_window_covers_the_frozen_screen_and_is_saved() {
         // A 1x screen beside a 2x one; a 20x10-point window across both,
-        // captured at 2x, red.
+        // under another, captured at 1x (whatever scale it comes at), red.
         let mut ed = editor(vec![shot("A", 0, 100, 50, 1, [0, 0, 0]), shot("B", 100, 100, 50, 2, [0, 0, 0])], true);
-        let mut img = Image::new(40, 20);
+        let win = |x: f32, id: &str| crate::windows::Window {
+            x,
+            y: 10.0,
+            width: 20.0,
+            height: 10.0,
+            app: "a".into(),
+            title: String::new(),
+            id: id.into(),
+        };
+        ed.windows = vec![win(95.0, "cover"), win(90.0, "w")];
+        assert!(ed.window_covered("w") && !ed.window_covered("cover"));
+        let mut img = Image::new(20, 10);
         for p in img.data.as_chunks_mut::<4>().0 {
             *p = [255, 0, 0, 255];
         }
-        ed.paste(Rect::from_xywh(90.0, 10.0, 20.0, 10.0).unwrap(), img, 2.0);
+        ed.raise_window("w", img);
         // swap_rb: the background is BGRA, so red is the third byte.
         let px = |s: &Screen, x: u32, y: u32| s.bg.pixel(x, y).map(|c| (c.red(), c.blue()));
         assert_eq!(px(&ed.screens[0], 95, 15), Some((0, 255)), "on the 1x screen");
-        assert_eq!(px(&ed.screens[1], 10, 30), Some((0, 255)), "on the 2x screen, at its scale");
+        assert_eq!(px(&ed.screens[1], 18, 38), Some((0, 255)), "on the 2x screen, scaled to it");
         assert_eq!(px(&ed.screens[0], 50, 15), Some((0, 0)), "elsewhere untouched");
+        assert_eq!(ed.windows[0].id, "w", "frontmost now, for clicks");
         drag(&mut ed, (92.0, 12.0), (108.0, 18.0));
         let out = ed.export().unwrap();
         assert_eq!(&out.data[..4], &[255, 0, 0, 255], "and it's what gets saved");
+
+        assert!(ed.lower_window());
+        assert_eq!(px(&ed.screens[0], 95, 15), Some((0, 0)), "lowering puts the screen back");
+        assert_eq!(ed.windows[0].id, "cover", "and the order");
+        assert!(!ed.lower_window(), "once");
     }
 
     fn drag(ed: &mut Editor, a: Pt, b: Pt) {
@@ -1409,6 +1532,76 @@ mod tests {
         ed.key(Key::Tab, Mods::default());
         click(&mut ed, (10.0, 290.0));
         assert_eq!(ed.sel.unwrap().width(), 400.0, "bare desktop selects the screen");
+    }
+
+    /// Only a window clicked counts as selected: one filling its screen has
+    /// the screen's rect, which Tab or drawing can select too.
+    #[test]
+    fn selected_window_is_only_the_one_clicked() {
+        let mut ed = editor(vec![shot("A", 0, 400, 300, 1, [0, 0, 0])], false);
+        let full =
+            crate::windows::Window { x: 0.0, y: 0.0, width: 400.0, height: 300.0, app: "a".into(), title: String::new(), id: "7".into() };
+        ed.windows = vec![full];
+        let click = |ed: &mut Editor, p: Pt| {
+            ed.pointer_motion(p, Mods::default());
+            ed.button_press(p, true, Mods::default());
+            ed.button_release(p, true);
+        };
+        let deselect = |ed: &mut Editor| {
+            ed.button_press((5.0, 5.0), false, Mods::default());
+            assert!(ed.sel.is_none());
+        };
+        click(&mut ed, (100.0, 100.0));
+        assert_eq!(ed.selected_window().map(|w| w.id.as_str()), Some("7"));
+
+        deselect(&mut ed);
+        ed.key(Key::Tab, Mods::default());
+        click(&mut ed, (100.0, 100.0));
+        assert_eq!(ed.sel.unwrap().width(), 400.0);
+        assert!(ed.selected_window().is_none(), "Tab picked the screen");
+
+        ed.key(Key::Tab, Mods::default());
+        deselect(&mut ed);
+        ed.key(Key::Tab, Mods::default());
+        click(&mut ed, (100.0, 100.0));
+        assert!(ed.selected_window().is_some());
+        deselect(&mut ed);
+        ed.tool = Tool::Rect;
+        drag(&mut ed, (10.0, 10.0), (50.0, 50.0));
+        assert_eq!(ed.sel.unwrap().width(), 400.0);
+        assert!(ed.selected_window().is_none(), "drawing selected the screen");
+    }
+
+    /// A click away from text being edited finishes it and keeps the
+    /// selection, rather than picking the window clicked.
+    #[test]
+    fn click_while_editing_text_keeps_the_selection() {
+        let mut ed = editor(vec![shot("A", 0, 400, 300, 1, [0, 0, 0])], false);
+        let win = |x: f32, id: &str| crate::windows::Window {
+            x,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            app: "a".into(),
+            title: String::new(),
+            id: id.into(),
+        };
+        ed.windows = vec![win(0.0, "1"), win(200.0, "2")];
+        let click = |ed: &mut Editor, p: Pt| {
+            ed.pointer_motion(p, Mods::default());
+            ed.button_press(p, true, Mods::default());
+            ed.button_release(p, true);
+        };
+        click(&mut ed, (50.0, 50.0));
+        let first = ed.sel;
+        ed.tool = Tool::Text;
+        click(&mut ed, (50.0, 50.0));
+        ed.key(Key::Char('h'), Mods::default());
+        assert!(ed.text.is_some());
+        ed.tool = Tool::Select;
+        click(&mut ed, (250.0, 50.0));
+        assert!(ed.text.is_none(), "the text is finished");
+        assert_eq!(ed.sel, first, "and the selection kept");
     }
 
     /// The screenshot overlay switches to record mode and back with Ctrl+R
@@ -1804,13 +1997,8 @@ mod tests {
                         if x1 <= x0 || y1 <= y0 {
                             continue;
                         }
-                        let mut tmp = Pixmap::new((x1 - x0) as u32, (y1 - y0) as u32).unwrap();
-                        ui::render(ed, 0, &mut tmp.as_mut(), (x0, y0));
-                        let row = (x1 - x0) as usize * 4;
-                        for (y, src) in tmp.data().chunks_exact(row).enumerate() {
-                            let off = ((y0 as usize + y) * 640 + x0 as usize) * 4;
-                            buf.data_mut()[off..off + row].copy_from_slice(src);
-                        }
+                        let r = damage::IRect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+                        damage::repaint(ed, 0, buf.data_mut(), 640, 400, r);
                     }
                 }
             }
@@ -1819,13 +2007,24 @@ mod tests {
             // tiny-skia's edge antialiasing varies a little with the target size,
             // so allow small AA wobble; a missed region shows stale dim/clean
             // content or missing chrome, which is far larger.
-            let diffs: Vec<i16> =
-                buf.data().iter().zip(full.data()).map(|(a, b)| (*a as i16 - *b as i16).abs()).filter(|d| *d > 2).collect();
-            let max = diffs.iter().copied().max().unwrap_or(0);
+            let diffs: Vec<(usize, i16)> = buf
+                .data()
+                .iter()
+                .zip(full.data())
+                .map(|(a, b)| (*a as i16 - *b as i16).abs())
+                .enumerate()
+                .filter(|(_, d)| *d > 2)
+                .collect();
+            let max = diffs.iter().map(|d| d.1).max().unwrap_or(0);
+            // Where they are, for working out which layer's damage fell short.
+            let (xs, ys): (Vec<usize>, Vec<usize>) = diffs.iter().map(|(i, _)| (i / 4 % 640, i / 4 / 640)).unzip();
+            let span = |v: &[usize]| (v.iter().min().copied().unwrap_or(0), v.iter().max().copied().unwrap_or(0));
             assert!(
                 max <= 48 && diffs.len() < 400,
-                "step {n}: {} differing values, max {max}: damage tracking missed something",
-                diffs.len()
+                "step {n}: {} differing values, max {max}, in x {:?}, y {:?}: damage tracking missed something",
+                diffs.len(),
+                span(&xs),
+                span(&ys)
             );
         };
 
@@ -2120,5 +2319,96 @@ mod tests {
         run("hover toolbar area", &mut ed, &|e, i| {
             e.pointer_motion((1100.0 + i as f32 * 4.0, 1340.0), m);
         });
+    }
+
+    /// `?` opens the sheet of shortcuts on the pointer's screen; any key or
+    /// click closes it without doing anything else, so Esc doesn't cancel.
+    #[test]
+    fn question_mark_shows_the_shortcuts() {
+        let mut ed = editor(vec![shot("A", 0, 1366, 768, 1, [0, 0, 0]), shot("B", 1366, 1366, 768, 1, [0, 0, 0])], false);
+        let m = Mods::default();
+        // As if the last ? was a while ago: a quick second one is a repeat.
+        let earlier = || std::time::Instant::now().checked_sub(std::time::Duration::from_secs(1));
+        drag(&mut ed, (100.0, 100.0), (300.0, 300.0));
+        ed.pointer_motion((2000.0, 400.0), m);
+        assert!(ed.key(Key::Char('?'), Mods { shift: true, ..m }));
+        assert_eq!(ed.help, Some(1));
+        let r = ui::help_rect(&ed).unwrap();
+        let b = ed.screens[1].bounds();
+        assert!(r.left() >= b.left() && r.right() <= b.right() && r.bottom() <= b.bottom(), "fits a 1366×768 screen: {r:?}");
+        let mut small = editor(vec![shot("A", 0, 960, 540, 2, [0, 0, 0])], false);
+        small.key(Key::Char('?'), m);
+        let r = ui::help_rect(&small).unwrap();
+        assert!(r.left() >= 0.0 && r.top() >= 0.0 && r.right() <= 960.0 && r.bottom() <= 540.0, "shrinks to fit 1920×1080 at 200 %: {r:?}");
+        ed.key(Key::Escape, m);
+        assert_eq!((ed.help, ed.outcome), (None, None));
+
+        ed.help_key_at = earlier();
+        ed.key(Key::Char('?'), m);
+        let sel = ed.sel;
+        ed.button_press((150.0, 150.0), false, m);
+        assert_eq!((ed.help, ed.sel), (None, sel), "the right-click only closed it");
+
+        ed.can_switch = true;
+        ed.key(Key::Char('r'), Mods { ctrl: true, ..m });
+        ed.help_key_at = earlier();
+        assert!(ed.key(Key::Char('?'), m) && ed.help.is_some(), "record mode has one too");
+        ed.key(Key::Char('?'), m);
+        ed.key(Key::Char('?'), m);
+        assert!(ed.help.is_some(), "a held ? repeats; that doesn't close it");
+        ed.help_key_at = earlier();
+        ed.key(Key::Char('?'), m);
+        assert!(ed.help.is_none(), "? again closes it");
+
+        ed.help_key_at = earlier();
+        ed.key(Key::Char('?'), m);
+        let w = ed.width;
+        assert!(ed.scroll(1.0) && ed.help.is_none() && ed.width == w, "scrolling only closed it");
+        ed.button_press((150.0, 150.0), true, m);
+        ed.help_key_at = earlier();
+        ed.key(Key::Char('?'), m);
+        assert!(ed.help.is_none(), "not mid-drag");
+        ed.button_release((150.0, 150.0), true);
+
+        ed.key(Key::Char('r'), Mods { ctrl: true, ..m });
+        ed.set_tool(Tool::Text);
+        ed.button_press((150.0, 150.0), true, m);
+        ed.button_release((150.0, 150.0), true);
+        ed.key(Key::Char('?'), m);
+        assert_eq!((ed.help, ed.text.as_ref().map(|t| t.text.as_str())), (None, Some("?")), "typed into text");
+    }
+
+    /// The hint bar says how to select, then how to finish until something
+    /// is drawn, moving out of the selection's way.
+    #[test]
+    fn the_hint_bar_follows_along() {
+        let mut ed = editor(vec![shot("A", 0, 1366, 768, 1, [0, 0, 0])], false);
+        let b = ed.screens[0].bounds();
+        let top = ui::hint_rect(&ed, b).expect("before selecting").top();
+        drag(&mut ed, (400.0, 300.0), (900.0, 500.0));
+        assert_eq!(ui::hint_rect(&ed, b).map(|r| r.top()), Some(top), "after selecting");
+        ed.sel = Rect::from_xywh(400.0, 10.0, 500.0, 300.0);
+        assert!(ui::hint_rect(&ed, b).unwrap().top() > 500.0, "below, out of the selection's way");
+        ed.sel = Some(b);
+        assert!(ui::hint_rect(&ed, b).is_none(), "nowhere to put it");
+        ed.sel = Rect::from_xywh(400.0, 300.0, 500.0, 200.0);
+        ed.set_tool(Tool::Rect);
+        drag(&mut ed, (450.0, 350.0), (500.0, 400.0));
+        assert!(!ed.shapes.is_empty() && ui::hint_rect(&ed, b).is_none(), "gone once something is drawn");
+    }
+
+    /// Shapes drawn before switching to record mode aren't shown there, so
+    /// they don't stop a right-click from selecting again.
+    #[test]
+    fn right_click_selects_again_in_record_mode() {
+        let mut ed = editor(vec![shot("A", 0, 400, 300, 1, [0, 0, 0])], false);
+        let m = Mods::default();
+        drag(&mut ed, (100.0, 100.0), (300.0, 250.0));
+        ed.shapes.push(Shape::Counter { pos: (150.0, 150.0), n: 1, color: Color::BLACK, radius: 20.0 });
+        ed.button_press((150.0, 150.0), false, m);
+        assert!(ed.sel.is_some(), "screenshot mode keeps the selection under the shapes");
+        ed.record = true;
+        ed.button_press((150.0, 150.0), false, m);
+        assert!(ed.sel.is_none());
     }
 }
