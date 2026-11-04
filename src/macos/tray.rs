@@ -109,7 +109,7 @@ fn run_action(a: Action) {
             if !out.status.success() {
                 let err = String::from_utf8_lossy(&out.stderr);
                 let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("it failed");
-                super::notify(&format!("{} failed", label(a)), last.trim_start_matches("clipt: "));
+                crate::notify::send(&format!("{} failed", label(a)), last.trim_start_matches("clipt: "), None);
             }
         })),
         Err(e) => eprintln!("clipt: starting {a:?}: {e}"),

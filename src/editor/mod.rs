@@ -3,6 +3,7 @@
 //! asks it to paint each output.
 
 pub mod damage;
+pub mod keys;
 pub mod shapes;
 pub mod ui;
 
@@ -252,6 +253,10 @@ pub struct Editor {
     last_click: Option<(std::time::Instant, Pt)>,
     /// Show the size/width hint pill until the next pointer move.
     pub width_hint: bool,
+    /// The `?` sheet of shortcuts, open on this screen.
+    pub help: Option<usize>,
+    /// The last `?`, to tell a held key's repeats from a second press.
+    help_key_at: Option<std::time::Instant>,
     /// Bumped whenever committed shapes change; forces a full redraw.
     revision: u64,
     drawn_revision: Option<u64>,
@@ -305,6 +310,8 @@ impl Editor {
             can_switch: false,
             last_click: None,
             width_hint: false,
+            help: None,
+            help_key_at: None,
             revision: 0,
             drawn_revision: None,
             drawn_sel: None,
@@ -678,6 +685,10 @@ impl Editor {
 
     pub fn button_press(&mut self, p: Pt, left: bool, mods: Mods) -> bool {
         self.pointer = p;
+        // A click closes the shortcut sheet, and does nothing else.
+        if self.help.take().is_some() {
+            return true;
+        }
         if self.picker.is_some() {
             if let Some(part) = ui::picker_hit(self, p).filter(|_| left) {
                 self.pick(part, p);
@@ -697,14 +708,15 @@ impl Editor {
                 return true;
             }
             // Right click backs out: in-progress drag, then text, then the
-            // picked shape, then the selection.
+            // picked shape, then the selection (in record mode, whose
+            // shapes aren't shown, even when there are some).
             if !matches!(self.drag, Drag::None) {
                 self.cancel_drag();
             } else if self.text.is_some() {
                 self.cancel_text();
             } else if self.selected.take().is_some() {
                 self.revision += 1;
-            } else if self.shapes.is_empty() {
+            } else if self.shapes.is_empty() || self.record {
                 self.sel = None;
                 self.tool = Tool::Select;
             }
@@ -856,6 +868,9 @@ impl Editor {
     }
 
     pub fn scroll(&mut self, dy: f32) -> bool {
+        if self.help.take().is_some() {
+            return true;
+        }
         if self.record {
             return false;
         }
@@ -868,6 +883,15 @@ impl Editor {
     }
 
     pub fn key(&mut self, key: Key, mods: Mods) -> bool {
+        if key == Key::Char('?') && !mods.ctrl && self.picker.is_none() && self.text.is_none() {
+            self.help_key();
+            return true;
+        }
+        // Any other key closes the shortcut sheet; Esc there mustn't also
+        // cancel.
+        if self.help.take().is_some() {
+            return true;
+        }
         if self.picker.is_some() {
             match key {
                 Key::Escape => self.close_picker(false),
@@ -959,6 +983,21 @@ impl Editor {
             Key::Delete | Key::Tab => return false,
         }
         true
+    }
+
+    /// `?` opens the sheet of shortcuts, or closes it. Hosts repeat a held
+    /// key, which would flicker it open and shut: a `?` soon after another
+    /// is taken as a repeat. Not mid-drag, where it would hide the drag.
+    fn help_key(&mut self) {
+        let now = std::time::Instant::now();
+        let repeat = self.help_key_at.is_some_and(|t| now.duration_since(t).as_millis() < 700);
+        self.help_key_at = Some(now);
+        if repeat {
+            return;
+        }
+        if self.help.take().is_none() && matches!(self.drag, Drag::None) {
+            self.help = Some(self.screen_at(self.pointer).unwrap_or(0));
+        }
     }
 
     /// Between screenshot and record mode. Annotations stay, but aren't shown
@@ -1816,13 +1855,8 @@ mod tests {
                         if x1 <= x0 || y1 <= y0 {
                             continue;
                         }
-                        let mut tmp = Pixmap::new((x1 - x0) as u32, (y1 - y0) as u32).unwrap();
-                        ui::render(ed, 0, &mut tmp.as_mut(), (x0, y0));
-                        let row = (x1 - x0) as usize * 4;
-                        for (y, src) in tmp.data().chunks_exact(row).enumerate() {
-                            let off = ((y0 as usize + y) * 640 + x0 as usize) * 4;
-                            buf.data_mut()[off..off + row].copy_from_slice(src);
-                        }
+                        let r = damage::IRect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+                        damage::repaint(ed, 0, buf.data_mut(), 640, 400, r);
                     }
                 }
             }
@@ -1831,13 +1865,24 @@ mod tests {
             // tiny-skia's edge antialiasing varies a little with the target size,
             // so allow small AA wobble; a missed region shows stale dim/clean
             // content or missing chrome, which is far larger.
-            let diffs: Vec<i16> =
-                buf.data().iter().zip(full.data()).map(|(a, b)| (*a as i16 - *b as i16).abs()).filter(|d| *d > 2).collect();
-            let max = diffs.iter().copied().max().unwrap_or(0);
+            let diffs: Vec<(usize, i16)> = buf
+                .data()
+                .iter()
+                .zip(full.data())
+                .map(|(a, b)| (*a as i16 - *b as i16).abs())
+                .enumerate()
+                .filter(|(_, d)| *d > 2)
+                .collect();
+            let max = diffs.iter().map(|d| d.1).max().unwrap_or(0);
+            // Where they are, for working out which layer's damage fell short.
+            let (xs, ys): (Vec<usize>, Vec<usize>) = diffs.iter().map(|(i, _)| (i / 4 % 640, i / 4 / 640)).unzip();
+            let span = |v: &[usize]| (v.iter().min().copied().unwrap_or(0), v.iter().max().copied().unwrap_or(0));
             assert!(
                 max <= 48 && diffs.len() < 400,
-                "step {n}: {} differing values, max {max}: damage tracking missed something",
-                diffs.len()
+                "step {n}: {} differing values, max {max}, in x {:?}, y {:?}: damage tracking missed something",
+                diffs.len(),
+                span(&xs),
+                span(&ys)
             );
         };
 
@@ -2132,5 +2177,96 @@ mod tests {
         run("hover toolbar area", &mut ed, &|e, i| {
             e.pointer_motion((1100.0 + i as f32 * 4.0, 1340.0), m);
         });
+    }
+
+    /// `?` opens the sheet of shortcuts on the pointer's screen; any key or
+    /// click closes it without doing anything else, so Esc doesn't cancel.
+    #[test]
+    fn question_mark_shows_the_shortcuts() {
+        let mut ed = editor(vec![shot("A", 0, 1366, 768, 1, [0, 0, 0]), shot("B", 1366, 1366, 768, 1, [0, 0, 0])], false);
+        let m = Mods::default();
+        // As if the last ? was a while ago: a quick second one is a repeat.
+        let earlier = || std::time::Instant::now().checked_sub(std::time::Duration::from_secs(1));
+        drag(&mut ed, (100.0, 100.0), (300.0, 300.0));
+        ed.pointer_motion((2000.0, 400.0), m);
+        assert!(ed.key(Key::Char('?'), Mods { shift: true, ..m }));
+        assert_eq!(ed.help, Some(1));
+        let r = ui::help_rect(&ed).unwrap();
+        let b = ed.screens[1].bounds();
+        assert!(r.left() >= b.left() && r.right() <= b.right() && r.bottom() <= b.bottom(), "fits a 1366×768 screen: {r:?}");
+        let mut small = editor(vec![shot("A", 0, 960, 540, 2, [0, 0, 0])], false);
+        small.key(Key::Char('?'), m);
+        let r = ui::help_rect(&small).unwrap();
+        assert!(r.left() >= 0.0 && r.top() >= 0.0 && r.right() <= 960.0 && r.bottom() <= 540.0, "shrinks to fit 1920×1080 at 200 %: {r:?}");
+        ed.key(Key::Escape, m);
+        assert_eq!((ed.help, ed.outcome), (None, None));
+
+        ed.help_key_at = earlier();
+        ed.key(Key::Char('?'), m);
+        let sel = ed.sel;
+        ed.button_press((150.0, 150.0), false, m);
+        assert_eq!((ed.help, ed.sel), (None, sel), "the right-click only closed it");
+
+        ed.can_switch = true;
+        ed.key(Key::Char('r'), Mods { ctrl: true, ..m });
+        ed.help_key_at = earlier();
+        assert!(ed.key(Key::Char('?'), m) && ed.help.is_some(), "record mode has one too");
+        ed.key(Key::Char('?'), m);
+        ed.key(Key::Char('?'), m);
+        assert!(ed.help.is_some(), "a held ? repeats; that doesn't close it");
+        ed.help_key_at = earlier();
+        ed.key(Key::Char('?'), m);
+        assert!(ed.help.is_none(), "? again closes it");
+
+        ed.help_key_at = earlier();
+        ed.key(Key::Char('?'), m);
+        let w = ed.width;
+        assert!(ed.scroll(1.0) && ed.help.is_none() && ed.width == w, "scrolling only closed it");
+        ed.button_press((150.0, 150.0), true, m);
+        ed.help_key_at = earlier();
+        ed.key(Key::Char('?'), m);
+        assert!(ed.help.is_none(), "not mid-drag");
+        ed.button_release((150.0, 150.0), true);
+
+        ed.key(Key::Char('r'), Mods { ctrl: true, ..m });
+        ed.set_tool(Tool::Text);
+        ed.button_press((150.0, 150.0), true, m);
+        ed.button_release((150.0, 150.0), true);
+        ed.key(Key::Char('?'), m);
+        assert_eq!((ed.help, ed.text.as_ref().map(|t| t.text.as_str())), (None, Some("?")), "typed into text");
+    }
+
+    /// The hint bar says how to select, then how to finish until something
+    /// is drawn, moving out of the selection's way.
+    #[test]
+    fn the_hint_bar_follows_along() {
+        let mut ed = editor(vec![shot("A", 0, 1366, 768, 1, [0, 0, 0])], false);
+        let b = ed.screens[0].bounds();
+        let top = ui::hint_rect(&ed, b).expect("before selecting").top();
+        drag(&mut ed, (400.0, 300.0), (900.0, 500.0));
+        assert_eq!(ui::hint_rect(&ed, b).map(|r| r.top()), Some(top), "after selecting");
+        ed.sel = Rect::from_xywh(400.0, 10.0, 500.0, 300.0);
+        assert!(ui::hint_rect(&ed, b).unwrap().top() > 500.0, "below, out of the selection's way");
+        ed.sel = Some(b);
+        assert!(ui::hint_rect(&ed, b).is_none(), "nowhere to put it");
+        ed.sel = Rect::from_xywh(400.0, 300.0, 500.0, 200.0);
+        ed.set_tool(Tool::Rect);
+        drag(&mut ed, (450.0, 350.0), (500.0, 400.0));
+        assert!(!ed.shapes.is_empty() && ui::hint_rect(&ed, b).is_none(), "gone once something is drawn");
+    }
+
+    /// Shapes drawn before switching to record mode aren't shown there, so
+    /// they don't stop a right-click from selecting again.
+    #[test]
+    fn right_click_selects_again_in_record_mode() {
+        let mut ed = editor(vec![shot("A", 0, 400, 300, 1, [0, 0, 0])], false);
+        let m = Mods::default();
+        drag(&mut ed, (100.0, 100.0), (300.0, 250.0));
+        ed.shapes.push(Shape::Counter { pos: (150.0, 150.0), n: 1, color: Color::BLACK, radius: 20.0 });
+        ed.button_press((150.0, 150.0), false, m);
+        assert!(ed.sel.is_some(), "screenshot mode keeps the selection under the shapes");
+        ed.record = true;
+        ed.button_press((150.0, 150.0), false, m);
+        assert!(ed.sel.is_none());
     }
 }

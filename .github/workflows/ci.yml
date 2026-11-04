@@ -110,6 +110,14 @@ jobs:
           cargo build --release --locked --target x86_64-apple-darwin
           mkdir -p dist
           lipo -create -output dist/clipt target/aarch64-apple-darwin/release/clipt target/x86_64-apple-darwin/release/clipt
+          # ScreenCaptureKit must be weakly linked (build.rs), or clipt won't
+          # start on macOS 12.0-12.2: in both architectures, nothing strong.
+          for arch in arm64 x86_64; do
+            otool -arch $arch -l dist/clipt | grep -A2 LC_LOAD_WEAK_DYLIB | grep -q ScreenCaptureKit.framework
+            if otool -arch $arch -l dist/clipt | grep -A2 'cmd LC_LOAD_DYLIB$' | grep -q ScreenCaptureKit.framework; then
+              echo "ScreenCaptureKit is strongly linked ($arch)"; exit 1
+            fi
+          done
           # An ad-hoc signature: Apple silicon runs nothing unsigned.
           codesign --force --sign - dist/clipt
           packaging/macos/build-app.sh dist/clipt dist
@@ -143,13 +151,45 @@ jobs:
           name: clipt-macos
           path: dist/
 
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # The examples are the Linux end-to-end tests' input driver and window.
+      - run: cargo clippy --bins --tests --locked -- -D warnings
+      - run: cargo test --locked --bins
+      - run: cargo build --release --locked
+      # The runner has a desktop session, so GDI can capture it.
+      - shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/clipt.exe dist/
+          dist/clipt.exe --version
+          dist/clipt.exe list
+          dist/clipt.exe full -o dist/full.png
+          file dist/full.png
+      - uses: actions/upload-artifact@v7
+        with:
+          name: clipt-windows
+          path: dist/
+
   nix:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: cachix/install-nix-action@v31
-      - run: nix build -L .#clipt
+      # Without the check phase, which compiled everything again to run the
+      # tests the test job already runs (more than two minutes). `nix build
+      # .#clipt` for users still runs them.
+      - run: |
+          nix build -L --impure --expr \
+            '(builtins.getFlake (toString ./.)).packages.${builtins.currentSystem}.clipt.overrideAttrs { doCheck = false; }'
       - run: ./result/bin/clipt --version
 
   deny:
@@ -162,7 +202,6 @@ jobs:
   # Real compositors in containers, driven by scripted input; every capture is
   # checked against grim or the expected native size.
   e2e:
-    needs: [test]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -170,6 +209,7 @@ jobs:
       matrix:
         suite:
           - { image: sway, layout: single }
+          - { image: sway, layout: sound }
           - { image: sway, layout: frac }
           - { image: sway, layout: dual }
           - { image: sway, layout: triple }
@@ -185,7 +225,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: .github/scripts/apt-install.sh libxkbcommon-dev
-      - run: cargo build --release --locked --bin clipt --example vinput --example testwin
+      - run: cargo build --profile ci --locked --bin clipt --example vinput --example testwin
       - uses: docker/setup-buildx-action@v4
       - uses: docker/build-push-action@v7
         with:
@@ -196,3 +236,5 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.suite.image }}
       - name: run
         run: tests/e2e.sh --no-build ${{ matrix.suite.image }} ${{ matrix.suite.layout }}
+        env:
+          CLIPT_PROFILE: ci

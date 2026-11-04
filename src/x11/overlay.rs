@@ -236,13 +236,7 @@ impl Session {
                 }
                 Some(rs) => {
                     for r in &rs {
-                        let Some(mut tmp) = tiny_skia::Pixmap::new(r.w as u32, r.h as u32) else { continue };
-                        crate::editor::ui::render(&self.editor, scr_idx, &mut tmp.as_mut(), (r.x, r.y));
-                        let row = r.w as usize * 4;
-                        for (y, src) in tmp.data().chunks_exact(row).enumerate() {
-                            let off = ((r.y as usize + y) * w as usize + r.x as usize) * 4;
-                            buf[off..off + row].copy_from_slice(src);
-                        }
+                        crate::editor::damage::repaint(&self.editor, scr_idx, buf, w, h, *r);
                     }
                     rs
                 }
